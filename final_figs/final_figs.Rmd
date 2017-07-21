@@ -1,0 +1,284 @@
+---
+title: "Final Figures"
+author: "Will Townes"
+date: "6/20/2017"
+output: html_document
+---
+
+```{r}
+library(ggplot2)
+
+extract_legend<-function(plt){
+  tmp <- ggplot_gtable(ggplot_build(plt))
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+  legend <- tmp$grobs[[leg]]
+  #grid.draw(legend)
+  legend
+}
+```
+
+# Figure 1: False Discovery with 2 Batch Dataset
+A- PCA
+B- tSNE v1
+C- tSNE v2
+D- ZIFA
+
+```{r}
+pd<-read.table("data/patel/mgh26_2Kgenes_all_methods.tsv",header=TRUE)
+pd$method<-factor(pd$method,levels=c("tSNE_plx_20","tSNE_plx_5","PCA","MDS","ZIFA","CMF","fSCLVM","ZINB-WAVE"))
+method_names<-c("PCA","tSNE_plx_5","tSNE_plx_20","ZIFA")
+plt_fn<-function(x,psize=1,axis_title_size=5){
+  ggplot(subset(pd,method==x),aes(x=dim1,y=dim2,colour=batch,shape=batch))+geom_point(size=psize)+theme_classic()+theme(legend.position="element_blank",axis.title=element_blank(),axis.text=element_text(size=axis_title_size))
+}
+for(i in seq_along(method_names)){
+  plt_fn(method_names[i])
+  ggsave(paste0("plots/fig1",letters[i],".pdf"),width=1.5,height=1.5)
+}
+#plt1<-cowplot::plot_grid(plotlist=lapply(method_names,plt_fn),labels="AUTO")
+#cowplot::ggsave("plots/fig1.pdf",plt1,width=4,height=4)
+
+#save legend separately
+pd_tmp<-subset(pd,method=="PCA")
+pd_tmp$Batch<-paste("MGH26",pd_tmp$batch,sep="-")
+plt<-ggplot(pd_tmp,aes(x=dim1,y=dim2,colour=Batch,shape=Batch))+geom_point(size=1)+theme_classic()+theme(axis.title=element_blank(),axis.text=element_text(size=5))
+ggsave("plots/fig1legend.pdf",plot=extract_legend(plt),width=4,height=4)
+ggsave("plots/fig1legend2.pdf",plot=extract_legend(plt+theme(legend.position="bottom")),width=4,height=4)
+```
+red: GLP, blue: HISEQ.
+
+# Figure 2abc - Correlation between Batch, Detection Rate, and PC1
+
+```{r}
+pd<-read.table("data/patel/mgh26_pca_detrate_g2k.tsv",header=TRUE)
+ggplot(pd,aes(x=det_rate,fill=instrument))+geom_density(alpha=.5)+theme_classic()+theme(legend.position = "element_blank", axis.title=element_blank())
+ggsave("plots/fig2a.pdf",width=3,height=3)
+
+cor(pd[,-4])
+ggplot(pd,aes(x=det_rate,y=dim1,colour=instrument,shape=instrument))+geom_point()+theme_classic()+theme(legend.position="element_blank",axis.title=element_blank())#+labs(x="detection rate",y="PC1") #correlation -0.72
+ggsave("plots/fig2b.pdf",width=3,height=3)
+
+ggplot(pd,aes(x=det_rate,y=dim2,colour=instrument,shape=instrument))+geom_point()+theme_classic()+theme(legend.position="element_blank",axis.title=element_blank())#+labs(x="detection rate",y="PC2") #correlation -0.59
+ggsave("plots/fig2c.pdf",width=3,height=3)
+```
+
+# Figure 2d - detection rate plot
+ABC= shalek, trapnell, Patel MGH26
+```{r}
+patel<-read.table("data/patel/mgh26_meta.tsv",header=TRUE)[,c("sampleType","instrument","det_rate")]
+table(patel$instrument[patel$sampleType=="SC"])
+trapnell<-read.csv("data/trapnell/meta.csv",header=TRUE)[,c("sampleType","hour","det_rate")]
+shalek<-read.csv("data/shalek/meta.csv",header=TRUE)[,c("sampleType","det_rate")]
+patel$study<-"Patel"
+patel$batch<-"batch2" #HiSEQ
+patel$batch[patel$instrument=="GLPB22-B5C"]<-"batch1"
+trapnell$study<-"Trapnell"
+#trapnell$batch<-paste("trapnell",trapnell$hour,sep="_")
+trapnell$batch<-plyr::mapvalues(trapnell$hour, from=paste0(c(0,24,48,72),"h"), to=paste0("batch",1:4))
+shalek$study<-"Shalek"
+shalek$batch<-"batch1"
+cnames<-c("sampleType","study","batch","det_rate")
+pd<-rbind(shalek[,cnames],trapnell[,cnames],patel[,cnames])
+pd$study<-factor(pd$study,levels=c("Shalek","Trapnell","Patel"))
+pd$batch<-factor(pd$batch)
+```
+```{r}
+ggplot(subset(pd,sampleType=="bulk"),aes(x=study,y=det_rate,fill=batch))+geom_boxplot()+theme_classic()
+
+ggplot(subset(pd,sampleType=="SC"),aes(x=study,y=det_rate))+geom_boxplot()+theme_classic()+theme(legend.position = "element_blank",axis.title=element_blank())+ylab("detection rate")
+ggsave("plots/fig2d.pdf",width=3,height=3)
+```
+Bulk detection averaged .28 for Trapnell, .36 for Shalek, .6 for Patel
+
+# Figure 3 - non-parametric plot for each of the three experiments
+
+```{r}
+shalek<-read.table("data/shalek/splines.tsv",header=TRUE)
+trapnell<-read.table("data/trapnell/splines.tsv",header=TRUE)
+patel<-read.table("data/patel/mgh26_spline_fits.tsv",header=TRUE)
+shalek$study<-"shalek"
+shalek$batch<-"shalek1"
+trapnell$study<-"trapnell"
+trapnell$batch<-paste0("trapnell_",trapnell$sample)
+patel$study<-"patel"
+patel$batch<-paste0("patel_",patel$instrument)
+cnames<-c("x","id","f","study","batch")
+pd1<-rbind(shalek[,cnames],patel[,cnames],trapnell[,cnames])
+```
+```{r}
+ggplot(pd1,aes(x=x,y=f,group=id))+geom_line(alpha=.8)+labs(x="bulk RNA-Seq log2-expression",y="single cell detection rate")+ theme_bw()+geom_hline(yintercept=1,linetype=2)+facet_wrap(~study,nrow=1)
+plot_func<-function(d){
+  ggplot(d,aes(x=x,y=f,group=id))+geom_line(alpha=.8)+theme_classic()+geom_hline(yintercept=1,linetype=2,alpha=.5)+theme(axis.title=element_blank())
+}
+plot_func(subset(pd1,study=="shalek"))
+ggsave("plots/fig3a.pdf",width=3,height=2)
+plot_func(subset(pd1,study=="trapnell"))
+ggsave("plots/fig3b.pdf",width=3,height=2)
+plot_func(subset(pd1,study=="patel"))
+ggsave("plots/fig3c.pdf",width=3,height=2)
+```
+
+# Figure 4- VAMF applied to 2-batch dataset
+
+4a- same as fig1 except with VAMF
+4b- shows VAMF b0 estimates absorb detection rate variability
+
+```{r}
+#fig4a
+#same graphics params as figure 1
+pd<-read.table("data/patel/mgh26_2Kgenes_all_methods.tsv",header=TRUE)
+ggplot(subset(pd,method=="CMF"),aes(x=dim1,y=dim2,colour=batch,shape=batch))+geom_point(size=1)+theme_classic()+theme(legend.position="element_blank",axis.title=element_blank(),axis.text=element_text(size=5))
+ggsave("plots/fig4a.pdf",width=1.5,height=1.5)
+
+#fig4b
+vpd<-read.table("data/patel/mgh26_2Kgenes_vamf.tsv",header=TRUE)
+ggplot(vpd,aes(x=b0,y=b1,colour=instrument,shape=instrument))+geom_point(size=1)+theme_classic()+theme(legend.position="element_blank",axis.title=element_blank(),axis.text=element_text(size=5))
+ggsave("plots/fig4b.pdf",width=1.5,height=1.5)
+```
+
+# Suppl Figure for Priors (formerly Figure 5)
+A- plot showing correlation between beta_0 MLEs and detection rate
+B- histogram of the beta_1 MLEs showing they are normal
+
+```{r}
+shalek<-read.table("data/shalek/logit.tsv",header=TRUE)
+shalek$study<-"shalek"
+shalek$batch<-"shalek1"
+trapnell<-read.table("data/trapnell/logit.tsv",header=TRUE)
+trapnell$study<-"trapnell"
+trapnell$batch<-trapnell$sample
+patel<-read.table("data/patel/mgh26_logit.tsv",header=TRUE)
+patel$study<-"patel"
+patel$batch<-patel$instrument
+cnames<-c("b0","b1","det_rate","study","batch")
+pd2<-rbind(shalek[,cnames],trapnell[,cnames],patel[,cnames])
+with(pd2,cor(det_rate,b0)) #.78
+```
+```{r}
+ggplot(pd2,aes(x=det_rate,y=b0))+geom_point(size=.2)+theme_classic()+labs(x="detection rate",y="intercept")
+ggsave("plots/fig5a.pdf",width=2,height=2)
+ggplot(pd2,aes(x=b1))+geom_histogram()+theme_classic()+xlab("slope")+theme(axis.title.y=element_blank())
+ggsave("plots/fig5b.pdf",width=2,height=2)
+
+#cauchy with scale 1 reasonable for b0
+hist(pd2$b0,probability=TRUE)
+curve(dcauchy(x,location=-2),from=-6,to=0,add=TRUE)
+```
+
+# Batch Separability
+
+using 100 random subsets of 2000 genes on the Patel MGH26 tumor
+
+```{r}
+res<-read.table("data/patel/mgh26_batch_separability.tsv",header=TRUE)
+res$method<-as.character(res$method)
+res$method[res$method=="tSNE_plx_5"]<-"t-SNE (plx=5)"
+res$method[res$method=="tSNE_plx_20"]<-"t-SNE (plx=20)"
+res$method[res$method=="fSCLVM"]<-"f-scLVM"
+res$method<-factor(res$method)
+res$method<-reorder(res$method,res$Batch_Separability,function(x){-median(x)})
+
+ggplot(subset(res,method!="MDS"), aes(x=method,y=Batch_Separability,fill=classifier))+geom_boxplot()+theme_classic()+coord_flip()+theme(legend.position="top")+ylab("batch separability")
+ggsave("plots/batch_separability_boxplot.pdf",width=4,height=3)
+
+#plt1_methods<-c("VAMF","tSNE (plx=5)","tSNE (plx=20)","PCA","ZIFA")
+#ggplot(subset(res,method %in% plt1_methods), aes(x=method,y=Batch_Separability,fill=classifier))+geom_boxplot()+theme_classic()+coord_flip()+theme(legend.position="top")+ylab("batch separability")
+#ggsave("plots/batch_separability/boxplot1.pdf",width=4,height=3)
+
+#plt2_methods<-c("VAMF","f-scLVM","ZINB-WAVE")
+#ggplot(subset(res,method %in% plt2_methods), aes(x=method,y=Batch_Separability,fill=classifier))+geom_boxplot()+theme_classic()+coord_flip()+theme(legend.position="top")+ylab("batch separability")
+#ggsave("plots/batch_separability/boxplot2.pdf",width=4,height=3)
+```
+
+# All Tumors in Glioblastoma Dataset
+
+```{r}
+pd<-read.table("data/patel/all_tumors_all_methods.tsv",header=TRUE)
+pd$method<-as.character(pd$method)
+pd$method[pd$method=="tSNE_plx_5"]<-"t-SNE (plx=5)"
+pd$method[pd$method=="tSNE_plx_20"]<-"t-SNE (plx=20)"
+pd$method<-factor(pd$method)
+pd$Batch<-as.character(pd$Tumor)
+tmp<-pd$Batch=="MGH26"
+pd$Batch[tmp]<-paste(pd$Batch[tmp],pd$Instrument[tmp],sep="-")
+pd$Batch<-as.factor(pd$Batch)
+
+plt1_methods<-c("PCA","t-SNE (plx=5)","t-SNE (plx=20)","VAMF","ZIFA")
+bigplt<-ggplot(subset(pd,method %in% plt1_methods), aes(x=dim1,y=dim2,colour=Batch)) + geom_point(size=0.7) + facet_wrap(~method,scales="free",nrow=3)+theme_bw()+labs(x="Dimension 1",y="Dimension 2") #+ theme(legend.position="bottom")
+
+ggsave("plots/all_tumors/legend.pdf",plot=extract_legend(bigplt),width=4,height=4)
+
+plt_fn<-function(m){
+  ggplot(subset(pd,method==m),aes(x=dim1,y=dim2,colour=Batch))+geom_point(size=.5)+theme_classic()+theme(legend.position = "element_blank",axis.text=element_text(size=5),axis.title=element_blank())
+}
+
+plts<-sapply(plt1_methods,plt_fn,simplify=FALSE,USE.NAMES=TRUE)
+cowplot::plot_grid(plotlist=plts)
+for(i in names(plts)){
+  ggsave(paste0("plots/all_tumors/",i,".pdf"),plot=plts[[i]],width=1.5,height=1.5)
+}
+```
+
+# Simulations
+
+noise only scenario
+
+```{r}
+pd<-read.table("data/simulations/noise_only_all_methods.tsv",header=TRUE)
+plt_fn<-function(m){
+  ggplot(subset(pd,method==m),aes(x=dim1,y=dim2,colour=Batch,shape=Batch))+geom_point()+theme_classic()+theme(legend.position = "element_blank",axis.text=element_text(size=5),axis.title=element_blank())
+}
+plts<-sapply(levels(pd$method),plt_fn,simplify=FALSE,USE.NAMES=TRUE)
+#cowplot::plot_grid(plotlist=plts)
+for(i in names(plts)){
+  ggsave(paste0("plots/simulations/noise_only/",i,".pdf"),plot=plts[[i]],width=1.5,height=1.5)
+}
+#plot the legend
+#https://stackoverflow.com/questions/12041042/how-to-plot-just-the-legends-in-ggplot2
+pd$Batch<-plyr::revalue(pd$Batch,c("high_detection"="high detection","low_detection"="low detection"))
+plt<-ggplot(subset(pd,method=="PCA"),aes(x=dim1,y=dim2,colour=Batch,shape=Batch))+geom_point()+theme_classic()+theme(axis.text=element_text(size=5),axis.title=element_blank())
+
+ggsave("plots/simulations/noise_only/legend.pdf",plot=extract_legend(plt))
+```
+
+latent clusters scenario
+
+```{r}
+pd<-read.table("data/simulations/latent_clusters_all_methods.tsv",header=TRUE)
+pd$Batch<-plyr::revalue(pd$Batch,c("high_detection"="high detection","low_detection"="low detection"))
+pd$Cluster<-factor(pd$Cluster_ID)
+
+ggplot(subset(pd,method %in% c("PCA","Truth","tSNE_plx_20","VAMF")),aes(x=dim1,y=dim2,shape=Cluster,colour=Batch))+geom_point(size=4)+facet_wrap(~method,scales="free")+theme_classic()+scale_shape_identity()
+
+plt_fn<-function(m){
+  ggplot(subset(pd,method==m),aes(x=dim1,y=dim2,colour=Batch,shape=Cluster))+geom_point(size=1.5)+theme_classic()+theme(legend.position = "element_blank",axis.text=element_text(size=5),axis.title=element_blank())+scale_shape_identity()
+}
+plts<-sapply(levels(pd$method),plt_fn,simplify=FALSE,USE.NAMES=TRUE)
+cowplot::plot_grid(plotlist=plts)
+for(i in names(plts)){
+  ggsave(paste0("plots/simulations/latent_clusters/",i,".pdf"),plot=plts[[i]],width=1.5,height=1.5)
+}
+
+plt<-ggplot(subset(pd,method=="PCA"),aes(x=dim1,y=dim2,colour=Batch,shape=Cluster))+geom_point()+theme_classic()+theme(axis.text=element_text(size=5),axis.title=element_blank())+scale_shape_identity()
+ggsave("plots/simulations/latent_clusters/legend.pdf",plot=extract_legend(plt))
+```
+
+circles=high detection, triangles= low detection
+
+replicates of latent clusters datasets
+
+```{r}
+pd<-read.table("data/simulations/latent_clusters_replicates.tsv",header=TRUE)
+pd<-subset(pd,(L==10 & svmult==1) | method!="VAMF")
+pd$method<-as.character(pd$method)
+pd$method[pd$method=="tSNE_plx_5"]<-"t-SNE (plx=5)"
+pd$method[pd$method=="tSNE_plx_20"]<-"t-SNE (plx=20)"
+pd$method[pd$method=="fSCLVM"]<-"f-scLVM"
+pd$method<-factor(pd$method)
+pd$scenario<-as.character(pd$scenario)
+pd$scenario[pd$scenario=="G500"]<-"G=500"
+pd$scenario[pd$scenario=="G1000"]<-"G=1000"
+pd$scenario<-factor(pd$scenario)
+pd$method<-reorder(pd$method,pd$cls_err,function(x){-mean(x)})
+ggplot(subset(pd,method != "f-scLVM"),aes(x=method,y=cls_err,fill=scenario))+geom_boxplot()+theme_classic()+ylab("misclassification error")+coord_flip()+theme(legend.position="top")
+ggsave("plots/simulations/latent_clusters_boxplot.pdf",width=4,height=3)
+```

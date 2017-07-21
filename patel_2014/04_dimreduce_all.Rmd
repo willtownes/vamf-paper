@@ -1,0 +1,203 @@
+---
+title: "Patel Glioblastoma- Dimension Reduction"
+author: "Will Townes"
+date: "5/20/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(modules) #devtools::install_github("klmr/modules")
+reshape2<-import_package("reshape2")
+bcse<-import_package("SummarizedExperiment")
+import_package("Matrix",attach=TRUE)
+import_package("ggplot2",attach=TRUE)
+existing<-import("../algs/existing") #pca, zifa, etc
+vamf<-import("../algs/vamf_stan") #our algorithm
+cls<-import("../util/classifiers") #used for LDA, QDA, visualizations
+fns<-import("../util/functions")
+plx2name<-function(plx){paste0("tSNE_plx_",plx)}
+```
+
+# All Tumors
+
+Exclude bulk RNA-Seq samples, non-tumor samples (eg cell lines), and samples not included by the authors in their analysis
+
+## Loading Data
+
+Filter for Patel's genes and cells in tumors, get sizefactors.
+
+```{r}
+#library(scran)
+dir.create("data/all_tumors")
+load("data/01_counts_genes.RData") #patel summarizedexperiment
+gmeta<-scan(file="extdata/genes_patel_used.txt",what="character")
+meta<-as.data.frame(bcse$colData(patel))
+incl<-with(meta,includeSample=="TRUE" & cellType=="Glioblastoma" & sampleType=="SC")
+patel_sc<-patel[rownames(patel) %in% gmeta, incl]
+m<-as.matrix(bcse$assay(patel_sc))
+meta<-as.data.frame(bcse$colData(patel_sc))
+
+sizefactors <- scran::computeSumFactors(m)#,positive=TRUE)
+library_size <- colSums(m)
+plot(log(library_size),log(sizefactors)) #corr=.98
+hist(sizefactors,breaks=20)
+
+m<-Matrix(m)
+
+meta$instrument<-as.factor(meta$instrument)
+meta$tumorName<-as.factor(meta$tumorName)
+cn<-colnames(meta)
+cn[cn=="tumorName"]<-"Tumor"
+cn[cn=="instrument"]<-"Instrument"
+colnames(meta)<-cn
+d<-list(counts=m)
+d$scran<-t(t(d$counts)/sizefactors)
+Y<-Matrix(d$scran)
+Y[Y<1]<-0 #detection threshold higher than zero for 'shot noise'
+fns$sparse2disk(Y,"data/all_tumors/Y.tsv")
+
+#raw counts needed for ZINB-WAVE
+Y_raw<-matrix(as.vector(d$counts,mode="integer"),nrow=nrow(d$counts))
+colnames(Y_raw)<-colnames(d$counts)
+rownames(Y_raw)<-rownames(d$counts)
+write.table(Y_raw,"data/all_tumors/Y_raw.txt",quot=FALSE)
+```
+
+## Dimension Reduction Methods
+
+Analyze using VAMF script. 5685 rows, 430 cols, latent dimension=10, timing was 35 minutes on laptop for 3 restarts.
+
+```
+time Rscript ../algs/vamf_script.R -d 10 -p 3 -i data/all_tumors/Y.tsv -o data/all_tumors/Y_vamf.tsv
+```
+
+Analyze using ZIFA. Took about 80 minutes (dimensionality=2)
+
+```
+time python ../util/zifa_wrapper.py data/all_tumors/Y.tsv -o data/all_tumors/Y_zifa.tsv
+```
+
+Analyze using ZINB-WAVE. 8 minutes (dim=2)
+
+```
+time Rscript ../algs/zinbwave_script.R -i data/all_tumors/Y_raw.txt -o data/all_tumors/Y_zinbwave.tsv
+```
+
+Analyze with fSCLVM. 2m48sec on laptop
+
+```
+time python ../util/fsclvm_wrapper.py data/all_tumors/Y.tsv -o data/all_tumors/Y_fsclvm.tsv --nHiddenSparse 2
+```
+
+```{r}
+img_save<-TRUE
+
+patel_plt<-function(factors,meta){
+  #x is data frame with factors, meta is data frame with batch info
+  #batch name is "instrument"
+  ggplot(cbind(meta,factors),aes(x=dim1,y=dim2,colour=Tumor,shape=Instrument))+geom_point(size=2)+theme_bw()+labs(x="Dimension 1",y="Dimension 2")
+}
+
+Y_obs<-log2(1+Y)
+
+### Detection Rates by Batch
+meta$Detection_Rate<-Matrix::colMeans(Y_obs>0)
+ggplot(meta,aes(x=Tumor,y=Detection_Rate,fill=Instrument))+geom_boxplot()+ylim(c(0,1))+ggtitle("Patel et al Detection Rates by Batch (all tumors)")+labs(y="Detection Rate")+theme_bw()
+ggsave(file="results/plots/all_tumors/detection_batch.pdf",height=6,width=8)
+
+plot_path<-file.path("./results/plots/all_tumors/scran")
+dir.create(plot_path)
+ggs<-function(plt,w=8,h=6){if(img_save) ggsave(file=file.path(plot_path,plt),width=w,height=h)}
+```
+
+```{r}
+### tSNE
+dat<-list()
+pplx<-20
+system.time(dat[[plx2name(pplx)]]<-factors<-existing$tsne(Y_obs,2,perplexity=pplx))
+#ggplot(cbind(factors,meta),aes(x=dim1,y=dim2,colour=tumorName,shape=instrument))+geom_point(size=2)
+patel_plt(factors,meta)+ggtitle(paste0("tSNE (perplexity ",pplx,")"))
+ggs("tsne_plx_hi.pdf")
+pplx<-5
+system.time(dat[[plx2name(pplx)]]<-factors<-existing$tsne(Y_obs,2,perplexity=pplx))
+patel_plt(factors,meta)+ggtitle(paste0("tSNE (perplexity ",pplx,")"))
+ggs("tsne_plx_lo.pdf")
+
+### PCA
+system.time(factors<-existing$pca(Y_obs,3,scale=FALSE))
+dat[["PCA"]]<-factors[,1:2]
+patel_plt(factors,meta)+ggtitle("Principal Components Analysis")
+ggs("pca12.pdf")
+ggplot(cbind(factors,meta),aes(x=dim2,y=dim3,color=Tumor,shape=Instrument))+geom_point(size=2)+theme_bw()+ggtitle("Principal Components Analysis")+labs(x="Dimension 2",y="Dimension 3")
+ggs("pca23.pdf")
+
+### MDS
+dat[["MDS"]]<-existing$mds(Y_obs,2,distance="manhattan",scale=FALSE)
+patel_plt(dat[["MDS"]],meta)+ggtitle("Manhattan Multidimensional Scaling")
+ggs("mds.pdf")
+
+### ZIFA
+factors <- read.table(file.path("data/all_tumors/Y_zifa.tsv"))
+colnames(factors)<-paste0("dim",1:2)
+dat[["ZIFA"]]<-factors
+patel_plt(factors,meta)+ggtitle("Zero Inflated Factor Analysis")
+ggs("zifa.pdf")
+
+### ZINB-WAVE
+factors<-read.table(file.path("data/all_tumors/Y_zinbwave.tsv"),header=TRUE)
+dat[["ZINB-WAVE"]]<-factors
+patel_plt(factors[,1:2],meta)+ggtitle("ZINB-WAVE")
+ggs("zinbwave.pdf")
+
+### fSCLVM
+factors<-read.table(file.path("data/all_tumors/Y_fsclvm.tsv"))
+colnames(factors)<-paste0("dim",1:2)
+dat[["fSCLVM"]]<-factors
+patel_plt(factors[,1:2],meta)+ggtitle("fSCLVM")
+ggs("fsclvm.pdf")
+
+### VAMF
+factors<-read.table(file.path("data/all_tumors/Y_vamf.tsv"),header=TRUE)
+barplot(vamf$colNorms(factors))
+dat[["VAMF"]]<-factors[,1:2]
+patel_plt(factors[,1:2],meta)+ggtitle("Varying-Censoring Aware Matrix Factorization")
+ggs("vamf_mnar.pdf")
+```
+
+#### Comparing all methods
+
+```{r}
+plot_path<-file.path("./results/plots/all_tumors/scran")
+pd<-do.call("rbind",lapply(names(dat),function(x){cbind(method=x,meta[,c("Instrument","Detection_Rate","Tumor")],dat[[x]])}))
+write.table(pd,file=file.path(plot_path,"all_methods.tsv"),row.names=FALSE)
+
+#cache for biostat paper
+write.table(pd,file="../biostat_paper/data/patel/all_tumors_all_methods.tsv",row.names=FALSE,quote=FALSE)
+
+#pd<-read.table(file.path(plot_path,"all_methods.tsv"),header=TRUE)
+pd$method<-factor(pd$method)
+plt1_methods<-c("VAMF","tSNE_plx_5","tSNE_plx_20","PCA","ZIFA")
+ggplot(pd[pd$method %in% plt1_methods,], aes(x=dim1,y=dim2,colour=Tumor,shape=Instrument)) + geom_point() + facet_wrap(~method,scales="free",nrow=3)+theme_bw()+labs(x="Dimension 1",y="Dimension 2") #+ theme(legend.position="bottom")
+ggs("all_methods1.pdf",w=8,h=10.5)
+
+pd$Batch<-as.character(pd$Tumor)
+tmp<-pd$Batch=="MGH26"
+pd$Batch[tmp]<-paste(pd$Batch[tmp],pd$Instrument[tmp],sep="-")
+pd$Batch<-as.factor(pd$Batch)
+ggplot(pd[pd$method %in% plt1_methods,], aes(x=dim1,y=dim2,colour=Batch)) + geom_point(size=0.7) + facet_wrap(~method,scales="free",nrow=3)+theme_bw()+labs(x="Dimension 1",y="Dimension 2") #+ theme(legend.position="bottom")
+ggs("all_methods2.pdf",w=8,h=10.5)
+
+#separation of MGH26 batches?
+ggplot(subset(pd,Tumor=="MGH26"),aes(x=dim1,y=dim2,colour=Batch))+geom_point(alpha=.5,size=.5)+facet_wrap(~method,scales="free")+theme_classic()
+```
+
+Correlations between PCs and detection rates
+
+```{r}
+ggplot(pd,aes(x=Detection_Rate,y=dim1,colour=Tumor,shape=Instrument))+geom_point(size=0.7)+facet_wrap(~method,scales="free",nrow=3)+theme_bw()+labs(x="Detection Rate",y="Dimension 1")
+ggs("all_methods_detrate.pdf",w=8,h=10.5)
+corvals<-plyr::ddply(pd,"method",plyr::summarise,corval=abs(cor(dim1,Detection_Rate)))
+corvals<-corvals[order(corvals$corval),]
+corvals$method<-factor(corvals$method,levels=levels(corvals$method)[order(corvals$corval)])
+ggplot(corvals,aes(x=method,y=corval))+geom_bar(stat="identity")+theme_classic()
+```

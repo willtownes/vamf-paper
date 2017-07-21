@@ -1,0 +1,196 @@
+---
+title: "Trapnell 2014"
+author: "Will Townes"
+date: "6/5/2017"
+output: html_document
+---
+
+```{r}
+library(modules)
+plyr<-import_package("plyr")
+import_package("Biobase",attach=TRUE) #funcs exprs() pData() etc
+import_package("ggplot2",attach=TRUE)
+fns<-import("../util/functions")
+```
+
+# Data Loading
+
+Data pre-processing was done by Stephanie. Here we just load the expression set object she created.
+
+```{r}
+detection_limit<-1.0
+load("data/Trapnell_fpkm.rda")
+trapnell<-myoblastHumanFPKM
+cm<-as.data.frame(pData(trapnell))
+q<-plyr$mapvalues(factor(cm$hour),from=c("hour0","Hour24","Hour48","hour72"),to=c("0h","24h","48h","72h"))
+cm$hour <- factor(q,levels=sort(levels(q)))
+cm$cell_id<-paste(cm$hour,cm$geo_accession,sep="_")
+cm$det_rate<-colMeans(exprs(trapnell) > detection_limit)
+pData(trapnell) <- cm
+table(cm$sampleType) #bulk and single cell samples
+with(cm,table(sampleType,hour,Model))
+#with(cm,table(sampleType,hour,instrument))
+#cm0<-cm
+```
+save intermediate data for biostats paper
+```{r}
+write.csv(cm,"../biostat_paper/data/trapnell/meta.csv",row.names=FALSE)
+```
+
+```{r}
+#d<-trapnell[,cm$hour=="0h"]
+dataprep<-function(d,detection_limit=1.0,badgene_limit=10){
+  badsamples<-apply(exprs(d),2,function(x){any(is.na(x))})
+  d<-d[,!badsamples]
+  cm<-as.data.frame(pData(d))
+  m<-exprs(d)
+  sc_idx<-cm$sampleType=="SC" & cm$debris=="debris: FALSE" & cm$numcells=="cells in well: 1" & cm$control=="control well: FALSE"
+  scm<-cm[sc_idx,]
+  sc<-m[,sc_idx]
+  sc<-matrix(as.integer(as.matrix(sc)>=detection_limit),nrow=nrow(sc))
+  scm$det_rate<-colMeans(sc) #before gene filtering!
+  badgenes<-rowSums(sc) < badgene_limit
+  sc<-sc[!badgenes,]
+  colnames(sc)<-scm$cell_id
+  blk_idx<-cm$sampleType=="bulk" & cm$debris=="debris: FALSE"
+  blk<-m[!badgenes,blk_idx]
+  #blk<-log2(pseudocount+blk)
+  mget(c("scm","sc","blk"))
+}
+data_list<-lapply(unique(cm$hour),function(h){dataprep(trapnell[,cm$hour==h])})
+names(data_list)<-unique(cm$hour)
+det_rate<-do.call("rbind",lapply(names(data_list),function(d){data.frame(det_rate=data_list[[d]]$scm$det_rate,hour=d)}))
+```
+
+Note we exclude genes detected in <10 cells from the spline fit to save computation time.
+
+There are four experimental conditions (hours 0, 24, 48, 72), for each of these, a single 96-well plate of single cells and 3 bulk replicates were run. For the 72h case, the bulk and SC samples were run on different sequencing machines, while for the other conditions it appears they were run on the same machine. Hence, the bulk versus SC comparison is most reliable for hours 0, 24, and 48.
+
+Make histogram comparing detection rates across batches. These detection rates are including ALL genes.
+
+```{r}
+ggplot(subset(det_rate,hour!="72h"),aes(x=hour,y=det_rate,fill=hour))+geom_boxplot()+xlab("experimental condition")+ylab("detection rate")+theme_bw()+theme(legend.position="element_blank")+ylim(0,.18)
+
+ggsave("results/plots/detection_boxplot.pdf",width=6,height=4)
+```
+
+# Gene Detection versus Bulk Expression
+
+## Nonparametric smoothers
+
+excludes all genes where bulk was less than 1 FPKM
+```{r}
+fit_smoother<-function(d, detection_limit=1, blk_sample=1){
+  print(paste("now fitting smoother to",d$scm$hour[1]))
+  blk<-d$blk[,blk_sample]
+  gzero<-blk< detection_limit
+  res<-fns$mspline2(log2(blk[!gzero]),d$sc[!gzero,])
+  res$sample<-d$scm$hour[1]
+  res
+}
+
+system.time(smooth_results<-lapply(data_list,fit_smoother)) #slow
+saveRDS(smooth_results,file="data/splines.rds")
+```
+
+```{r}
+#smooth_results<-readRDS("data/splines.rds")
+pd1<-do.call("rbind",smooth_results)
+
+ggplot(pd1[pd1$sample!="72h",],aes(x=x,y=f,group=id))+geom_line(alpha=.8)+labs(x="bulk RNA-Seq log2-expression",y="single cell detection rate")+ theme_bw()+geom_hline(yintercept=1,linetype=2)+facet_wrap(~sample,nrow=1)
+#ggsave("plots/np_bulk_vs_sc.pdf",width=8,height=4)
+
+pd2<-lapply(smooth_results,fns$summarize_mspline2)
+ftemp<-function(data_list_item,pd2_item){
+  #intended to extract the detection rate from the data_list and append to the pd2 data frame
+  scm<-data_list_item$scm
+  pd2_item$cell_id<-pd2_item$id
+  plyr$join(pd2_item,scm,by="cell_id")
+}
+pd2<-mapply(ftemp,data_list,pd2,SIMPLIFY=FALSE)
+pd2<-do.call("rbind",pd2)
+```
+
+save intermediate data for biostats paper
+```{r}
+write.table(pd1,"../biostat_paper/data/trapnell/splines.tsv",quot=FALSE,row.names=FALSE)
+write.table(pd2,"../biostat_paper/data/trapnell/splines_summary.tsv",quot=FALSE,row.names=FALSE)
+```
+
+```{r}
+#ggplot(pd2,aes(x=slope*4,fill=hour))+geom_density(alpha=.5)+theme_bw()
+ggplot(pd2[pd2$hour!="72h",],aes(x=hour,y=slope*4,fill=hour))+geom_boxplot()+theme_bw()+theme(legend.position = "element_blank")+ylab("4*(maximum slope)")
+ggsave("results/plots/spline_slope_boxplot.pdf")
+
+ggplot(pd2[pd2$hour!="72h",],aes(x=hour,y=det_rates,fill=hour))+geom_boxplot()+theme_bw()
+#ggplot(pd2,aes(x=lo,y=hi,colour=hour))+geom_point(size=2)+theme_bw()+xlim(0,.25)+ylim(.75,1)
+#ggplot(pd2,aes(x=inflection,y=slope,colour=hour))+geom_point(size=2)+theme_bw()
+#ggsave("results/plots/slope_inflect.png")
+ggplot(pd2[pd2$hour!="72h",],aes(x=det_rates,y=inflection,colour=hour))+geom_point(size=2)+theme_bw()+xlab("detection rate")+ylab("inflection point")+theme(legend.position="element_blank")
+ggsave("results/plots/inflect_detrate.pdf")
+#ggplot(pd2,aes(x=det_rates,y=slope,colour=hour))+theme_bw()+geom_point(size=2)
+#ggsave("results/plots/slope_detrate.pdf")
+```
+
+## Parametric Model
+
+Logistic Regression
+
+```{r}
+fit_logit<-function(d,detection_limit=1,blk_sample=1){
+  print(paste("now fitting logistic regression to",d$scm$hour[1]))
+  blk<-d$blk[,blk_sample]
+  gzero<-blk< detection_limit
+  Y<-d$sc[!gzero,]
+  x<-log2(blk[!gzero])
+  logit_func<-function(i){
+    coef(glm(Y[,i]~x,family=binomial()))
+  }
+  res<-as.data.frame(t(sapply(seq.int(ncol(Y)),logit_func)))
+  colnames(res)<-c("b0","b1")
+  res$det_rate<-colMeans(Y)
+  res$sample<-d$scm$hour[1]
+  res
+}
+
+logit_results<-lapply(data_list,fit_logit) #10 seconds
+pdlogi<-do.call("rbind",logit_results)
+#save for biostat paper
+write.table(pdlogi,file="../biostat_paper/data/trapnell/logit.tsv",quot=FALSE,row.names=FALSE)
+```
+
+## Old version of Parametric Models
+
+Not used anymore, retained for reference only.
+
+Too many cells to graph directly. For illustration purposes, take a random sample of 10 cells from each of the three time groups.
+
+```{r}
+#dp<-import("../util/dropout_models")
+system.time(par_results<-lapply(data_list,function(d){dp$fit_logit(d$blk[,1],d$sc)})) #76 seconds
+for(n in names(par_results)){
+  par_results[[n]]$sample<-n
+}
+make_pars_interpretable<-function(bdat){
+  #bdat = data frame with columns "b0", "b1"
+  #b0= intercept from logistic regression
+  #b1 = slope from logistic regression
+  #returns a new data frame with added columns "slope" and "inflection" = -b0/b1
+  bdat$slope<-bdat$b1/4 #match scale of spline
+  bdat$inflection<- -bdat$b0/bdat$b1
+  bdat
+}
+par_results<-lapply(par_results,make_pars_interpretable)
+#saveRDS(par_results,file="sc_vs_bulk_parametric.rds")
+```
+```{r}
+#par_results<-readRDS("sc_vs_bulk_parametric.rds")
+par_pd<-do.call("rbind",par_results)
+colnames(par_pd)[5:6]<-c("par_slope","par_inflection")
+par_pd$cell_id<-par_pd$id
+pd3<-plyr$join(pd2,par_pd,by=c("cell_id"))
+ggplot(pd3,aes(x=slope,y=par_slope,colour=sample))+geom_point()+theme_bw()+xlab("Nonparametric Slope")+ylab("Parametric Slope")+geom_abline(slope=1,intercept=0)
+#ggsave("results/plots/np_vs_par_slope.pdf")
+ggplot(pd3,aes(x=inflection,y=par_inflection,colour=sample))+geom_point()+theme_bw()+xlab("Nonparametric Inflection")+ylab("Parametric Inflection")+geom_abline(slope=1,intercept=0)
+#ggsave("results/plots/np_vs_par_inflection.pdf")
+```

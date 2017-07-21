@@ -1,0 +1,295 @@
+---
+title: "Testing the Algorithm with Simulations"
+author: "Will Townes"
+date: "May 20, 2016"
+output: html_document
+---
+
+## Setup
+
+```{r}
+options(mc.cores=3)
+library(modules) #devtools::install_github('klmr/modules')
+import_package("ggplot2",attach=TRUE)
+Matrix<-import_package("Matrix")
+sims<-import("../simulations/sims") #simulate missing data mechanisms
+existing<-import("../algs/existing") #pca, zifa, etc
+vamf<-import("../algs/vamf_stan") #our algorithm
+img_save<-TRUE
+```
+
+Misc. functions used elsewhere
+
+```{r}
+plt_noise<-function(factors,batch){
+  #create ggplot object
+  #batch should be same length as ncol(factors)
+  ggplot(factors,aes(x=dim1,y=dim2,colour=batch,shape=batch))+geom_point(size=3)+theme_bw()+labs(x="Dimension 1",y="Dimension 2")
+}
+plt_clst<-function(factors,ref){
+  #ref is a data frame with "batch" and "id" variables
+  ggplot(cbind(factors,ref),aes(x=dim1,y=dim2,colour=id,shape=batch))+geom_point(size=3)+theme_bw()+labs(x="Dimension 1",y="Dimension 2")
+}
+plx2name<-function(plx){paste0("tSNE_plx_",plx)}
+logit<-function(p){log(p)-log(1-p)}
+```
+
+## Scenario I- Noise Only
+
+Generate data that is just random noise, but allow two batches with different informative dropout rates. Expect traditional methods to detect two clusters but VAMF to find nothing of interest. The missingness rate will be roughly 60%.
+
+```{r}
+plot_path<-file.path("results/plots/noise_only")
+ggs<-function(plt,w=3,h=3){if(img_save) ggsave(file=file.path(plot_path,plt),width=w,height=h)}
+```
+
+```{r}
+set.seed(101)
+sim1<-sims$noise_only(160,500,50) #N,G,Gsignal
+dat<-list(Truth=sim1$ref[,c("dim1","dim2")])
+batch<-sim1$ref$batch
+Y_obs<-sim1$Y_obs
+(cens<-signif(sum(Y_obs==0)/prod(dim(Y_obs)),3)) #missingness rate
+#visualize missingness mechanism
+cens_rates_obs<-Matrix$colMeans(Y_obs==0)
+plot(sim1$ref$cens_rates,cens_rates_obs,xlab="expected censoring rate",ylab="empirical censoring rate",main="censoring rates by cell")
+abline(0,1)
+ggplot(dat[["Truth"]],aes(x=dim1,y=dim2,colour=batch,shape=batch))+geom_point(size=3)+theme_bw()+ggtitle("Original Latent Space")+labs(x="Dimension 1",y="Dimension 2")
+ggs("00_original_space.pdf")
+
+#write sparse matrix to disk
+#summary() converts to COO (tuple) format
+write.table(Matrix$summary(Y_obs),file="plot_data/noise_only.tsv",row.names=FALSE,quot=FALSE)
+#Y_obs2<-do.call(Matrix$sparseMatrix,read.table("plot_data/noise_only.tsv",header=TRUE))
+#stopifnot(max(abs(Y_obs2-Y_obs))<1e-5) #check for errors
+```
+
+### Standard Dimension Reduction Methods
+
+```{r}
+### tSNE
+pplx<-20
+system.time(dat[[plx2name(pplx)]]<-factors<-existing$tsne(Y_obs,2,perplexity=pplx))
+plt_noise(factors,batch)+ggtitle(paste0("tSNE (perplexity ",pplx,")"))
+ggs("tsne_plx_hi.pdf")
+pplx<-5
+system.time(dat[[plx2name(pplx)]]<-factors<-existing$tsne(Y_obs,2,perplexity=pplx))
+plt_noise(factors,batch)+ggtitle(paste0("tSNE (perplexity ",pplx,")"))
+ggs("tsne_plx_lo.pdf")
+
+### PCA
+system.time(factors<-existing$pca(Y_obs,3))
+dat[["PCA"]]<-factors[,1:2]
+factors$detection_rate<-1-cens_rates_obs
+ggplot(factors,aes(x=detection_rate,y=dim1,color=batch,shape=batch))+geom_point(size=3)+theme_bw()+ggtitle("PC1 correlates with cell-specific detection rate")+labs(x="Detection Rate",y="Dimension 1")
+cor(factors[,"dim1"],cens_rates_obs)
+ggs("pca1_det.pdf")
+
+plt_noise(factors,batch)+ggtitle("Principal Components Analysis")
+ggs("pca12.pdf")
+ggplot(factors,aes(x=dim2,y=dim3,color=batch,shape=batch))+geom_point(size=3)+theme_bw()+ggtitle("Principal Components Analysis")+labs(x="Dimension 2",y="Dimension 3")
+ggs("pca23.pdf")
+
+### Multidimensional Scaling
+dat[["MDS"]]<-existing$mds(Y_obs,2,distance="manhattan")
+plt_noise(dat[["MDS"]],batch)+ggtitle("Manhattan Multidimensional Scaling")
+ggs("mds.pdf")
+```
+
+### ZIFA
+
+```
+time python ../util/zifa_wrapper.py plot_data/noise_only.tsv --log-transform False
+```
+This takes about 47s
+
+```{r}
+factors <- read.table("plot_data/noise_only_zifa.tsv")
+colnames(factors)<-paste0("dim",1:2)
+dat[["ZIFA"]]<-factors
+plt_noise(factors,batch)+ggtitle("Zero Inflated Factor Analysis")
+ggs("zifa.pdf")
+```
+
+### fSCLVM
+
+```
+time python ../util/fsclvm_wrapper.py plot_data/noise_only.tsv --log-transform False --nHiddenSparse 2
+```
+This took 6s
+
+```{r}
+factors <- read.table("plot_data/noise_only_fsclvm.tsv")
+
+colnames(factors)<-paste0("dim",1:2)
+dat[["fSCLVM"]]<-factors
+plt_noise(factors,batch)+ggtitle("f-SCLVM")
+#ggs("fsclvm.pdf")
+colSums(factors) #0,0
+```
+fSCLVM shrinks sparse factors to zero when they are noise only. 
+
+### Varying-censoring Aware Matrix Factorization
+
+This is our algorithm.
+
+```{r}
+#Y_obs<-do.call(Matrix$sparseMatrix,read.table("plot_data/noise_only.tsv",header=TRUE))
+system.time(res<-vamf$vamf(Y_obs,10,log2trans=FALSE)) #126 s
+#batch<-rep(c("high detection","low detection"),each=80)
+plt_noise(res$factors,batch)
+barplot(existing$colNorms(res$factors)) #dimension learning?
+
+dat[["VAMF"]]<-res$factors[,1:2]
+plt_noise(dat[["VAMF"]],batch)+ggtitle("Varying-censoring Aware Matrix Factorization")
+ggs("vamf.pdf")
+```
+
+### Comparison of Methods
+
+```{r}
+pd<-do.call("rbind",lapply(names(dat),function(x){cbind(method=x,Batch=batch,dat[[x]])}))
+write.table(pd,file="plot_data/noise_only_all_methods.tsv",row.names=FALSE)
+#pd<-read.table("plot_data/noise_only_all_methods.tsv",header=TRUE)
+pd$method<-factor(pd$method,levels=c("Truth","VAMF","tSNE_plx_20","tSNE_plx_5","PCA","MDS","ZIFA","fSCLVM"))
+
+#save for biostat paper
+dir.create("../biostat_paper/data/simulations")
+write.table(pd,file="../biostat_paper/data/simulations/noise_only_all_methods.tsv",quot=FALSE,row.names=FALSE)
+
+ggplot(subset(pd,!(method %in% c("MDS","fSCLVM"))), aes(x=dim1,y=dim2,colour=Batch,shape=Batch)) + geom_point() + facet_wrap(~method,scales="free",nrow=3)+theme_bw()+labs(x="Dimension 1",y="Dimension 2")+theme(legend.position="top")
+ggs("all_methods.pdf",w=4,h=6)
+```
+
+## Scenario II- Latent Clusters
+
+```{r}
+plot_path<-file.path("results/plots/latent_clusters")
+ggs<-function(plt,w=3,h=3){if(img_save) ggsave(file=file.path(plot_path,plt),width=w,height=h)}
+```
+
+```{r}
+set.seed(101)
+sim2<-sims$latent_clusters(160,1000,50)
+dat<-list(Truth=sim2$ref[,c("dim1","dim2")])
+ref<-sim2$ref[,c("id","batch")]
+Y_obs<-sim2$Y_obs
+cens_rates<-sim2$ref$cens_rates
+(cens<-signif(Matrix$mean(Y_obs==0),3)) #missingness rate
+#visualize missingness mechanism
+cens_rates_obs<-Matrix$colMeans(Y_obs==0)
+plot(cens_rates,cens_rates_obs,xlab="expected censoring rate",ylab="empirical censoring rate",main="censoring rates by cell")
+abline(0,1)
+plt_clst(dat[["Truth"]],ref)+ggtitle("Original Latent Space")
+ggs("00_original_space.pdf")
+#write sparse matrix to disk
+#summary() converts to COO (tuple) format
+write.table(summary(Y_obs),file="plot_data/latent_clusters.tsv",row.names=FALSE,quot=FALSE)
+```
+
+### Standard Dimension Reduction Methods
+
+```{r}
+### tSNE
+pplx<-20
+system.time(dat[[plx2name(pplx)]]<-factors<-existing$tsne(Y_obs,2,perplexity=pplx))
+plt_clst(factors,ref)+ggtitle(paste0("tSNE (perplexity ",pplx,")"))
+ggs("tsne_plx_hi.pdf")
+pplx<-5
+system.time(dat[[plx2name(pplx)]]<-factors<-existing$tsne(Y_obs,2,perplexity=pplx))
+plt_clst(factors,ref)+ggtitle(paste0("tSNE (perplexity ",pplx,")"))
+ggs("tsne_plx_lo.pdf")
+
+### PCA
+system.time(factors<-existing$pca(Y_obs,3))
+dat[["PCA"]]<-factors[,1:2]
+factors$detection_rate<-1-cens_rates_obs
+ggplot(cbind(factors,ref),aes(x=detection_rate,y=dim1,color=id,shape=batch))+geom_point(size=3)+theme_bw()+ggtitle("PC1 correlates with cell-specific detection")+labs(x="Detection Rate",y="Dimension 1")
+cor(factors[,"dim1"],cens_rates)
+ggs("pca1_det.pdf")
+
+plt_clst(factors,ref)+ggtitle("Principal Components Analysis")
+ggs("pca12.pdf")
+ggplot(cbind(factors,ref),aes(x=dim2,y=dim3,color=id,shape=batch))+geom_point(size=3)+theme_bw()+ggtitle("Principal Components Analysis")+labs(x="Dimension 2",y="Dimension 3")
+ggs("pca23.pdf")
+
+### Multidimensional Scaling
+dat[["MDS"]]<-existing$mds(Y_obs,2,distance="manhattan")
+plt_clst(dat[["MDS"]],ref)+ggtitle("Manhattan Multidimensional Scaling")
+ggs("mds.pdf")
+```
+
+### Variable-censoring Aware Matrix Factorization
+
+This is our new algorithm VAMF. We also compare the effect of svmult tuning parameter on dimension learning.
+
+```{r}
+#Y_obs<-do.call(Matrix$sparseMatrix,read.table("plot_data/latent_clusters.tsv",header=TRUE))
+system.time(res<-vamf$vamf(Y_obs,10,log2trans=FALSE)) #256 sec
+
+plt_clst(res$factors[,1:2],ref)
+barplot(existing$colNorms(res$factors))
+#plt_clst(res$factors[,1:2],ref)
+#barplot(existing$colNorms(res$factors))
+
+dat[["VAMF"]]<-res$factors[,1:2]
+plt_clst(dat[["VAMF"]],ref)+ggtitle("Varying-censoring Aware Matrix Factorization")
+ggs("vamf.pdf")
+```
+
+VAMF also learns the correct dimensionality
+
+```{r}
+pdf("results/plots/latent_clusters/vamf_dim_learn.pdf",8,6)
+barplot(existing$colNorms(res$factors),xlab="Latent Dimension",ylab="L2 Norm of Posterior Mean")#,main="VAMF Automatic Dimensionality Learning")
+dev.off()
+```
+
+### ZIFA
+
+```
+time python ../util/zifa_wrapper.py plot_data/latent_clusters.tsv --log-transform False
+```
+3m25s
+
+```{r}
+factors <- read.table("plot_data/latent_clusters_zifa.tsv")
+colnames(factors)<-paste0("dim",1:2)
+dat[["ZIFA"]]<-factors
+plt_clst(factors,ref)+ggtitle("Zero Inflated Factor Analysis")
+ggs("zifa.pdf")
+```
+
+### fSCLVM
+
+```
+time python ../util/fsclvm_wrapper.py plot_data/latent_clusters.tsv --log-transform False --nHiddenSparse 2
+```
+This took 9 seconds
+
+```{r}
+factors <- read.table("plot_data/latent_clusters_fsclvm.tsv")
+colnames(factors)<-paste0("dim",1:2)
+dat[["fSCLVM"]]<-factors
+plt_clst(factors,ref)+ggtitle("f-SCLVM")
+ggs("fsclvm.pdf")
+```
+fSCLVM does a good job removing the detection rate bias by absorbing it into dense factors, but can be too aggressive at pruning away dimensions.
+
+### Comparison of Methods
+
+```{r}
+pd<-do.call("rbind",lapply(names(dat),function(x){cbind(method=x,ref,dat[[x]])}))
+write.table(pd,file="plot_data/latent_clusters_all_methods.tsv",row.names=FALSE)
+#pd<-read.table("plot_data/latent_clusters_all_methods.tsv",header=TRUE)
+pd$method<-factor(pd$method,levels=c("Truth","VAMF","tSNE_plx_20","tSNE_plx_5","PCA","MDS","ZIFA","fSCLVM"))
+pd$id<-as.factor(pd$id)
+colnames(pd)[2:3]<-c("Cluster_ID","Batch")
+
+#save for biostat paper
+write.table(pd,file="../biostat_paper/data/simulations/latent_clusters_all_methods.tsv",row.names=FALSE,quot=FALSE)
+
+ggplot(subset(pd,!(method %in% c("MDS","fSCLVM"))), aes(x=dim1,y=dim2,colour=Cluster_ID,shape=Batch)) + geom_point() + facet_wrap(~method,scales="free",nrow=3)+theme_bw()+labs(x="Dimension 1",y="Dimension 2")+theme(legend.position="top")
+
+ggs("all_methods.pdf",w=4,h=6)
+```

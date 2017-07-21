@@ -1,0 +1,198 @@
+---
+title: "Sensitivity Analysis of VAMF"
+author: "Will Townes"
+date: "7/3/2017"
+output: html_document
+---
+
+```{r}
+library(modules)
+import_package("ggplot2",attach=TRUE)
+plyr<-import_package("plyr")
+cls<-import("../util/classifiers")
+existing<-import("../algs/existing")
+
+#useful functions, copied from ../algs/vamf_stan.R
+effective_dimension<-function(x,thresh=.05){
+  #x is a matrix representing latent factors in the columns.
+  #finds the effective dimension by first computing L2 norms of each column
+  #columns with L2 norm greater than the maximum norm times 'thresh' are nonzero
+  #columns with L2 norm less than the cutoff (above) are 'zero'
+  #returns a count of the number of nonzero columns
+  l2norms<-existing$colNorms(x)
+  sum( l2norms > max(l2norms)*thresh )
+}
+```
+
+First, create the simulated data with the script *make_test_data.R*. 
+
+```
+Rscript make_test_data.R
+```
+
+It stores the test datasets under the folder *data/*. There are two scenarios:
+
+1. G500- 160 cells, 50 informative genes, and G=500 total genes
+2. G1000- 160 cells, 50 informative genes, and G=1000 total genes
+
+In both scenarios, the true latent dimension for the clusters is two (2).
+
+The test data are under subfolders */input/* for each scenario. For each scenario there are ten (10) replicate datasets. A dataset consists of the observed expression matrix *Y.tsv* (a sparse Matrix stored in COO format), and the reference file *ref.tsv* which contains batch and cluster IDs, the coordinates in the original latent space, and other metadata for each simulated cell. 
+
+For each test data replicate, we run nine (9) combinations of hyperparameters:
+
+* Latent Dimension upper bound tuning parameter (L): 2,5,10
+* ARD multiplier (svmult): .2,1,5. This parameter multiplies the ARD hyperparameter up or down relative to the empirical setting.
+
+Run all nine settings against the first test data set:
+
+```
+Rscript vamf_script_sims.R 1
+```
+
+Run against all test data. Avoid using GNU-Parallel here since there is parallelism in the VAMF R script already (parallel multiple restarts for each scenario).
+
+```
+bash -c 'for i in {1..10}; do Rscript vamf_script_sims.R $i; done;'
+```
+
+Run ZIFA against all test data- does not include reference IDs in results but those can be added later
+
+```
+mkdir -p data/G500/zifa_out
+mkdir -p data/G1000/zifa_out
+seq 1 10 | parallel python ../util/zifa_wrapper.py data/G500/input/Y{}.tsv -o data/G500/zifa_out/{}.tsv --log-transform False
+seq 1 10 | parallel python ../util/zifa_wrapper.py data/G1000/input/Y{}.tsv -o data/G1000/zifa_out/{}.tsv --log-transform False
+```
+
+Run f-scLVM against all test data- also does not include reference IDs
+
+```
+mkdir -p data/G500/fsclvm_out
+mkdir -p data/G1000/fsclvm_out
+seq 1 10 | parallel python ../util/fsclvm_wrapper.py data/G500/input/Y{}.tsv -o data/G500/fsclvm_out/{}.tsv --log-transform False --nHiddenSparse 2
+seq 1 10 | parallel python ../util/fsclvm_wrapper.py data/G1000/input/Y{}.tsv -o data/G1000/fsclvm_out/{}.tsv --log-transform False --nHiddenSparse 2
+```
+
+```{r}
+nreps<-10
+z_id<-expand.grid(replicate=1:nreps,scenario=c("G500","G1000"))
+#load results from ZIFA and combine with reference
+load_zifa<-function(x){
+  p<-z_id[x,]
+  i<-p$replicate
+  scenario<-p$scenario
+  ref<-read.table(file.path("data",scenario,"input",paste0("ref",i,".tsv")),header=TRUE)
+  res<-read.table(file.path("data",scenario,"zifa_out",paste0(i,".tsv")))
+  colnames(res)<-paste0("zifa_dim",1:ncol(res))
+  cbind(ref,res)
+}
+dat<-list()
+dat[["ZIFA"]]<-lapply(1:nrow(z_id),load_zifa)
+
+#load results from f-scLVM and combine with reference
+load_fsclvm<-function(x){
+  p<-z_id[x,]
+  i<-p$replicate
+  scenario<-p$scenario
+  ref<-read.table(file.path("data",scenario,"input",paste0("ref",i,".tsv")),header=TRUE)
+  res<-read.table(file.path("data",scenario,"fsclvm_out",paste0(i,".tsv")))
+  colnames(res)<-paste0("fsclvm_dim",1:ncol(res))
+  cbind(ref,res)
+}
+dat[["f-scLVM"]]<-lapply(1:nrow(z_id),load_fsclvm)
+```
+
+Run tSNE and PCA against simulations
+
+```{r}
+run_tsne<-function(x,pplx=5){
+  p<-z_id[x,]
+  i<-p$replicate
+  scenario<-p$scenario
+  ref<-read.table(file.path("data",scenario,"input",paste0("ref",i,".tsv")),header=TRUE)
+  Y<-read.table(file.path("data",scenario,"input",paste0("Y",i,".tsv")),header=TRUE)
+  Y<-do.call(Matrix::sparseMatrix,Y)
+  res<-existing$tsne(Y,2,perplexity=pplx)
+  colnames(res)<-paste0("tsne_dim",1:ncol(res))
+  cbind(ref,res)
+}
+run_pca<-function(x){
+  p<-z_id[x,]
+  i<-p$replicate
+  scenario<-p$scenario
+  ref<-read.table(file.path("data",scenario,"input",paste0("ref",i,".tsv")),header=TRUE)
+  Y<-read.table(file.path("data",scenario,"input",paste0("Y",i,".tsv")),header=TRUE)
+  Y<-do.call(Matrix::sparseMatrix,Y)
+  res<-existing$pca(Y,2)
+  colnames(res)<-paste0("pca_dim",1:ncol(res))
+  cbind(ref,res)
+}
+
+dat[["PCA"]]<-lapply(1:nrow(z_id),run_pca)
+dat[["tSNE_plx_5"]]<-lapply(1:nrow(z_id),run_tsne,pplx=5)
+dat[["tSNE_plx_20"]]<-lapply(1:nrow(z_id),run_tsne,pplx=20)
+```
+merge PCA, tSNE, and ZIFA classification error results
+```{r}
+cls_err_func<-function(x){
+  cbind(z_id,method=x,cls_err=vapply(dat[[x]],function(y){cls$lda_wrap(y[,6:7],y$id)},0.5))
+}
+pd0<-do.call("rbind",lapply(names(dat),cls_err_func))
+```
+
+loading results of VAMF runs on simulations
+```{r}
+#load results from VAMF
+nreps<-10
+v_id0<-read.csv("data/vamf_param_index.csv")
+v_id1<-do.call("rbind",lapply(1:nreps,function(x){v_id0$replicate<-x; v_id0}))
+v_id1$scenario<-"G500"
+v_id2<-v_id1
+v_id2$scenario<-"G1000"
+v_id<-rbind(v_id1,v_id2)
+load_vamf<-function(x){
+  #x is the row index in v_id
+  #v_id data frame contains parameter info, use it to determine which dataset of results to load
+  p<-v_id[x,]
+  read.table(file.path("data",p$scenario,"vamf_out",p$replicate,paste0(p$index,".tsv")),header=TRUE)
+}
+
+dat_vamf<-lapply(1:nrow(v_id),load_vamf)
+v_id$cls_err<-vapply(dat_vamf,function(x){cls$lda_wrap(x[,6:7],x$id)},0.5)
+v_id$method<-"VAMF"
+v_id$index<-NULL
+```
+
+Merge ZIFA results with VAMF results
+
+```{r}
+pd0$L<-2
+pd0$svmult<-NA
+pd_all<-rbind(pd0,v_id)
+pd_subset<-rbind(pd0,subset(v_id,L==10 & svmult==1))
+#cache plot data for later use
+write.table(pd_all,file="../biostat_paper/data/simulations/latent_clusters_replicates.tsv",row.names=FALSE,quot=FALSE)
+```
+```{r}
+ggplot(pd_all,aes(x=method,y=cls_err,fill=scenario))+geom_boxplot()+theme_classic()
+ggplot(pd_subset,aes(x=method,y=cls_err,fill=scenario))+geom_boxplot()+theme_classic()
+```
+
+# Sensitivity Analysis of VAMF Tuning Parameters
+
+Assessing effect of tuning parameters on learning correct dimensionality and assessing cluster separability using LDA
+
+```{r}
+pd<-v_id
+pd$L<-factor(pd$L); pd$svmult<-factor(pd$svmult)
+ggplot(pd,aes(x=svmult,y=cls_err,fill=scenario))+geom_boxplot()+facet_wrap(~L)+theme_classic()
+
+#correct dimension learned?
+pd$efdim<-vapply(dat_vamf,function(x){effective_dimension(x[,6:ncol(x)])},1)
+pd2<-plyr$ddply(pd,c("L","svmult","scenario"),plyr$summarise,low=mean(efdim<2),correct=mean(efdim==2),high=mean(efdim>2))
+pd2<-reshape2::melt(pd2,c("L","svmult","scenario"),c("high","correct","low"),variable.name="dimension_learned",value.name="percent_correct")
+ggplot(pd2,aes(x=svmult,y=percent_correct,fill=dimension_learned))+geom_bar(stat="identity",colour="black",position="dodge")+facet_grid(scenario~L)+theme_classic()
+pd2[pd2$L=="10" & pd2$svmult=="1",]
+table(pd[pd$L=="10" & pd$svmult=="1",c("efdim","scenario")])
+```

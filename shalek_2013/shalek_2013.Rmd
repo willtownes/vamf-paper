@@ -1,0 +1,141 @@
+---
+title: "Shalek 2013 BMDCs"
+author: "Will Townes"
+date: "12/13/2016"
+output: html_document
+---
+
+```{r}
+library(modules)
+plyr<-import_package("plyr")
+bb<-import_package("Biobase") #funcs exprs() pData() etc
+import_package("ggplot2",attach=TRUE)
+fns<-import("../util/functions")
+```
+
+# Data Loading
+
+Data pre-processing was done by Stephanie. Here we just load the expression set object she created.
+
+```{r}
+#initializing data
+threshold<-1.0 #below this level of TPMs, things are considered "not detected"
+load("data/ShalekBMDCsMouseTPM.rda")
+pd<-bb$pData(BMDCsMouseTPM)
+table(pd$sampleType) #bulk and single cell samples
+pd$det_rate<-colMeans(bb$exprs(BMDCsMouseTPM)>threshold)
+#remove genes that are zero across all samples
+badgenes<-rowSums(bb$exprs(BMDCsMouseTPM)>threshold)==0 
+bulk_eset<-BMDCsMouseTPM[!badgenes,pd$sampleType=="bulk"]
+sc_eset<-BMDCsMouseTPM[!badgenes,pd$sampleType=="SC"]
+sc<-matrix(as.integer(bb$exprs(sc_eset)>=threshold),nrow=nrow(sc_eset)) #binary 0/1 matrix indicating whether gene was nonzero
+blk<-bb$exprs(bulk_eset)[,1]
+gzero<-blk < threshold
+
+boxplot(colMeans(sc[gzero,])) #.06-.10
+hist(pd$det_rate[pd$sampleType=="SC"],breaks=10)
+#pdf("plots/detection_boxplot.pdf",4,4)
+boxplot(pd$det_rate[pd$sampleType=="SC"],ylab="detection rate",ylim=c(0,.18)) #save as 4x4 image
+#dev.off()
+
+#save intermediate data
+write.csv(pd,file="../biostat_paper/data/shalek/meta.csv",row.names=FALSE)
+```
+
+# Gene Detection versus Bulk Expression
+
+## Nonparametric smoothers
+
+We fit a smoother to the log2 of TPM bulk data with no pseudocount. Excludes all genes where bulk was <1 TPM. Excludes all genes that were zero across all cells.
+
+```{r}
+npres<-fns$mspline2(log2(blk[!gzero]),sc[!gzero,])#,ncores=2)
+#save intermediate data
+write.table(npres,file="../biostat_paper/data/shalek/splines.tsv",quot=FALSE,row.names=FALSE)
+```
+```{r}
+ggplot(npres,aes(x=x,y=f,group=id))+geom_line()+labs(x="bulk RNA-Seq log2-expression",y="single cell detection rate")+ theme_bw()+ylim(0,1)
+ggsave("plots/np_bulk_vs_sc.pdf",height=6,width=8)
+
+ggplot(npres,aes(x=x,y=df,group=id))+geom_line()+labs(x="bulk RNA-Seq smoothed avg expr",y="derivative of single cell detection rate")+ theme_bw()
+
+pd2<-fns$summarize_mspline2(npres)
+
+pdf("plots/spline_slope_boxplot.pdf",4,4)
+boxplot(4*pd2$slope,ylab="4*(maximum slope)")
+dev.off()
+
+ggplot(pd2,aes(x=det_rates,y=inflection))+geom_point(size=2)+theme_bw()+xlab("detection rate")+ylab("inflection point")
+ggsave("plots/inflect_detrate.pdf")
+
+ggplot(pd2[pd2$hour!="72h",],aes(x=det_rates,y=inflection,colour=hour))+geom_point(size=2)+theme_bw()+xlab("detection rate")+ylab("inflection point")+theme(legend.position="element_blank")
+```
+
+## Parametric Models
+
+logistic regression
+
+```{r}
+Y<-sc[!gzero,]
+x<-log2(blk[!gzero])
+logit_func<-function(i){
+  coef(glm(Y[,i]~x,family=binomial()))
+}
+res<-as.data.frame(t(sapply(seq.int(ncol(Y)),logit_func)))
+colnames(res)<-c("b0","b1")
+res$det_rate<-colMeans(Y)
+
+#save for biostat paper
+write.table(res,file="../biostat_paper/data/shalek/logit.tsv",quot=FALSE,row.names=FALSE)
+```
+
+## Old Parametric Model Comparisons
+
+not really used anymore but keeping in case I need to look something up later.
+
+```{r}
+stmod_names<-c("logit")
+res<-sapply(stmod_names,function(j){dp$fit_mm(blk[,1],sc,model_type=j,lo=.1,hi=.98,pseudocount=pseudocount)},simplify=FALSE)
+#with(res[["logit"]],plot(d,r,xlab="intercepts (d_n)",ylab="slopes (r_n)"))
+pres<-lapply(res,dp$predict_mm,npres$bulk[npres$sc=="sc1"],ncell=nlevels(npres$sc))
+for(i in seq_along(pres)){
+  pres[[i]]$model<-names(pres)[i]
+}
+pres<-do.call("rbind",pres)
+
+baseplot<-ggplot(npres)+geom_point(aes(x=bulk,y=avg_detection),size=.5)+facet_wrap(~sc,nrow=6)+theme_bw()+ylab("smoothed single cell detection rate")+xlab("bulk RNA-Seq expression")
+baseplot+geom_line(aes(x=bulk,y=avg_detection,colour=model), pres)
+#ggsave(file="bulk_vs_detection.pdf")
+```
+
+comparing models by prediction accuracy
+
+```{r}
+rmse<-function(x,y){sqrt(mean((x-y)^2))}
+pres$nonpar_avg_detection<-npres$avg_detection
+pred_err<-plyr$ddply(pres,c("sc","model"),plyr$summarise, prediction_error=rmse(avg_detection,nonpar_avg_detection))
+ggplot(pred_err,aes(x=model,y=prediction_error,fill=model))+geom_boxplot()+theme_bw()+coord_flip()+ylab("prediction error (rmse)")
+#ggsave("prediction_rmse.pdf")
+```
+
+comparing variation in slope and intercept parameters for logit and MM models
+
+```{r}
+#parameter estimates for zifa
+res$zifa
+#plot the slopes and intercepts for the logit model
+pdlogi<-data.frame(res$logit)
+ggplot(pdlogi,aes(x=d,y=r))+geom_point(size=2)+theme_bw()+xlab("logit intercept parameter")+ylab("logit slope parameter")
+#ggsave("logit_slope_intercept.pdf")
+ggplot(pdlogi,aes(x=d))+geom_histogram(bins=8,fill="white",colour="black")+xlab("logit intercepts")+theme_bw()
+#ggsave("logit_intercept_hist.pdf")
+ggplot(pdlogi,aes(x=r))+geom_histogram(bins=8,fill="white",colour="black")+xlab("logit slopes")+theme_bw()
+#ggsave("logit_slope_hist.pdf")
+
+#plot the intercepts for the mm model
+pdmm<-data.frame(res$mm)
+ggplot(pdmm,aes("",d))+geom_boxplot()+coord_flip()+ylab("mm intercept parameter")+xlab("")
+#ggsave("mm_intercept.pdf")
+```
+
+Make plot of curves using "averaged single cell" versus detection rate instead of bulk as reference, expect to confirm the M3Drop result that MM model is the best in that case.

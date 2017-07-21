@@ -1,0 +1,242 @@
+---
+title: "Comparing Bulk and Single Cell Expression"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(modules) #devtools::install_github("klmr/modules")
+import_package("Matrix",attach=TRUE)
+import_package("ggplot2",attach=TRUE)
+bcse<-import_package("SummarizedExperiment")
+plyr<-import_package("plyr")
+fns<-import("../util/functions")
+```
+
+# Gene Detection versus Bulk Expression
+
+```{r}
+apply_smoother<-function(scm,sc,blk,blk_col=1){
+  #if blk is a matrix, defaults to using only first column
+  if(!is.null(ncol(blk))) blk<-blk[,blk_col]
+  full_res<-list()
+  for(i in levels(scm$instrument)){
+    #res<-fns$binsmooth(sc[,scm$instrument==i],blk,20,xname="bulk",cname_base="sc")
+    res<-fns$mspline2(blk,sc[,scm$instrument==i])
+    res$instrument<-i
+    full_res[[i]]<-res
+  }
+  do.call("rbind",full_res)
+}
+```
+
+## MGH26
+
+Here we focus only on tumor MGH26, using only the genes and cells that were included by the Patel et al authors.
+
+data loading
+```{r}
+load("data/MGH26/02_counts_genes_filtered.RData")
+cm<-bcse$colData(mgh26)
+cm$det_rate<-cm$detection/nrow(mgh26)
+gmeta<-scan(file="extdata/genes_patel_used.txt",what="character")
+mgh26<-mgh26[rownames(mgh26) %in% gmeta,]
+cm<-as.data.frame(cm)
+mgh26sc<-mgh26[,cm$sampleType=="SC"]
+mgh26blk<-mgh26[,cm$sampleType=="bulk"]
+m<-bcse$assay(mgh26sc,1)
+sizefactors <- scran::computeSumFactors(as.matrix(m))#,positive=TRUE)
+m<-t(t(m)/sizefactors)
+scm<-bcse$colData(mgh26sc)
+blk<-as.vector(bcse$assay(mgh26blk,1))
+names(blk)<-rownames(mgh26blk)
+gzero<-blk==0 #zero counts for bulk expression profile, handle separately.
+#blk<-log2(pseudocount+blk)
+sc<-matrix(as.integer(as.matrix(m)>1.0),nrow=nrow(m)) #detection threshold = 1 normalized count
+colnames(sc)<-scm$cell_id
+scm$instrument<-factor(scm$instrument)
+#scm$det_rates<-colMeans(sc)
+
+sc_det_blk0<-colMeans(sc[gzero,])
+```
+apply smoother- slow step
+```{r}
+res<-apply_smoother(scm,sc[!gzero,],log2(blk[!gzero])) #slow
+write.table(res,file="data/MGH26/spline_fits.tsv",row.names=FALSE,quot=FALSE)
+```
+
+write intermediate data for biostats paper
+```{r}
+write.table(cm,file="../biostat_paper/data/patel/mgh26_meta.tsv",row.names=FALSE,quot=FALSE)
+write.table(res,file="../biostat_paper/data/patel/mgh26_spline_fits.tsv",row.names=FALSE,quot=FALSE)
+```
+
+visualize results
+```{r}
+#res<-read.table("data/MGH26/spline_fits.tsv",header=TRUE)
+boxplot(sc_det_blk0) #.05-.15 detection rate
+#ggplot(res,aes(x=x,y=f,colour=instrument,group=id,linetype=instrument))+geom_line()+theme_bw()
+pd1<-res[order(res$instrument),]
+ggplot(pd1,aes(x=x,y=f,group=id,colour=instrument,linetype=instrument))+geom_line(alpha=.5)+labs(x="bulk RNA-Seq log2-expression",y="single cell detection rate")+ theme_bw()#+geom_hline(yintercept=1,linetype=2)
+ggsave("results/plots/MGH26/np_bulk_vs_sc.pdf",width=6,height=4)
+
+pd2<-fns$summarize_mspline2(pd1)
+pd2<-merge(pd2,scm,by.x="id",by.y="cell_id")
+ggplot(pd2,aes(x=inflection,fill=instrument))+geom_histogram(position="dodge",bins=10,colour="black")+theme_bw()
+ggsave("results/plots/MGH26/inflect_hist.pdf",height=6,width=8)
+ggplot(pd2,aes(x=inflection,y=slope,colour=instrument))+geom_jitter(width=.2,size=2)+theme_bw()
+ggsave("results/plots/MGH26/slope_inflect.pdf")
+ggplot(pd2,aes(x=det_rates,y=inflection,colour=instrument))+geom_jitter(height=.2,size=2)+theme_bw()+xlab("detection rate")
+ggsave("results/plots/MGH26/inflect_detrate.pdf")
+ggplot(pd2,aes(x=det_rates,y=slope,colour=instrument))+theme_bw()+geom_point(size=2)
+ggsave("results/plots/MGH26/slope_detrate.pdf")
+signif(cor(pd2_mgh26[,c("det_rates","inflection","slope")]),2)
+```
+
+### Parametric Model
+
+```{r}
+fit_logit<-function(scm,sc,blk,detection_limit=1,blk_sample=1){
+  if(!is.null(ncol(blk))) blk<-blk[,blk_col]
+  gzero<- blk<detection_limit
+  Y<-sc[!gzero,]
+  x<-log2(blk[!gzero])
+  logit_func<-function(i){
+    coef(glm(Y[,i]~x,family=binomial()))
+  }
+  res<-as.data.frame(t(sapply(seq.int(ncol(Y)),logit_func)))
+  colnames(res)<-c("b0","b1")
+  res$det_rate<-colMeans(Y)
+  res$instrument<-scm$instrument
+  res
+}
+
+res<-fit_logit(scm,sc,blk)
+#save intermediate data for use in biostat paper
+write.table(res,"../biostat_paper/data/patel/mgh26_logit.tsv",quot=FALSE,row.names=FALSE)
+```
+
+comparison of nonparametric slope and intercept terms to values estimated by CMF
+```{r}
+cmf<-import("../algs/cmf_stan") #our algorithm
+system.time(cmf_res<-cmf$cmf(m,5)) #880 seconds=15 minutes
+saveRDS(cmf_res,file="data/MGH26/cmf_result_spline_data.rds")
+```
+```{r}
+#cmf_res<-readRDS("data/MGH26/cmf_result_spline_data.rds")
+pd2$cmf_inflection<- -cmf_res$b0/cmf_res$b1
+pd2$cmf_slope<-cmf_res$b1
+ggplot(pd2,aes(x=inflection,y=cmf_inflection,colour=instrument))+geom_point()+theme_bw()+xlab("nonparametric inflection point estimate")+ylab("CMF inflection point estimate") #correlation .93
+ggsave("results/plots/MGH26/inflect_cmf.pdf",width=8,height=6)
+ggplot(pd2,aes(x=slope,y=cmf_slope,colour=instrument))+geom_point()+theme_bw()+xlab("nonparametric slope estimate")+ylab("CMF slope estimate") #correlation .66
+ggsave("results/plots/MGH26/slope_cmf.pdf",width=8,height=6)
+```
+misc exploration of other CMF params
+```{r}
+pd3<-cbind(pd2,cmf_res$factors)
+ggplot(pd3,aes(x=dim1,y=dim2,colour=instrument))+geom_point()+theme_bw()
+unorms<-apply(cmf_res$factors,2,function(x){sqrt(sum(x^2))})
+barplot(unorms)
+barplot(colMeans(cmf_res$factors))
+vnorms<-apply(cmf_res$loadings,1,function(x){sqrt(sum(x^2))})
+barplot(vnorms)
+signif(tcrossprod(cmf_res$loadings),1)
+y_imp1<-crossprod(cmf_res$V,cmf_res$U)
+y_imp2<-t(as.matrix(cmf_res$factors) %*% cmf_res$loadings)
+hist(y_imp1-y_imp2)
+max(abs(y_imp1-y_imp2)) 
+```
+
+## All Tumors
+
+Data pre-processing was done by Stephanie. Here we just load the expression set object she created. There was only one bulk sample for each tumor so use it as the baseline reference.
+
+```{r}
+load("data/02_counts_genes_filtered.RData")
+cm<-as.data.frame(bcse$colData(patel))
+cm$sample<-factor(cm$sample)
+#data_list<-lapply(cm$sample,function(s){patel[,cm$sample==s]})
+dataprep<-function(d,pseudocount=.01){
+  cm<-as.data.frame(bcse$colData(d))
+  m<-bcse$assays(d)$counts
+  #table(cm$sampleType) #bulk and single cell samples
+  #with(cm,table(sampleType,instrument)) #note that bulk was only run on HISEQ
+  #remove genes that are observed in less than 5 samples
+  badgenes<-rowSums(m>0)<5
+  blk<-m[!badgenes,cm$sampleType=="bulk"]
+  sc<-m[!badgenes,cm$sampleType=="SC"]
+  blk<-log2(pseudocount+blk)
+  sc<-matrix(as.integer(as.matrix(sc)>0),nrow=nrow(sc))
+  scm<-cm[cm$sampleType=="SC",]
+  colnames(sc)<-scm$cell_id
+  scm$instrument<-factor(scm$instrument)
+  scm$det_rates<-colMeans(sc)
+  mget(c("scm","sc","blk"))
+}
+data_list<-lapply(unique(cm$sample),function(s){dataprep(patel[,cm$sample==s])})
+names(data_list)<-unique(cm$sample)
+with(data_list[["MGH26"]]$scm,boxplot(det_rates ~ factor(instrument),xlab="sequencing instrument",ylab="detection rate"))
+```
+
+```{r}
+system.time(smooth_results<-lapply(data_list,function(d){apply_smoother(d$scm,d$sc,d$blk)}))
+#that took 15 minutes! (no parallelization)
+for(d in names(smooth_results)){
+  smooth_results[[d]]$sample<-d
+}
+#save(smooth_results,file="data/all_tumors/sc_vs_bulk_smoothed.rda")
+```
+
+```{r}
+#load("data/all_tumors/sc_vs_bulk_smoothed.rda")
+pd1<-do.call("rbind",smooth_results)
+ggplot(pd1,aes(x=x,y=f,group=id))+geom_line(alpha=.8)+labs(x="bulk RNA-Seq binned avg expr",y="single cell detection rate")+ theme_bw()+geom_hline(yintercept=1,linetype=2)+facet_wrap(~sample)
+ggsave("results/plots/all_tumors/np_bulk_vs_sc.pdf")
+
+pd2<-lapply(smooth_results,fns$summarize_mspline2)
+ftemp<-function(data_list_item,pd2_item){
+  #intended to extract the detection rate from the data_list and append to the pd2 data frame
+  scm<-data_list_item$scm
+  pd2_item$cell_id<-pd2_item$id
+  plyr$join(pd2_item,scm,by="cell_id")
+}
+pd2<-mapply(ftemp,data_list,pd2,SIMPLIFY=FALSE)
+pd2<-do.call("rbind",pd2)
+pd2<-pd2[pd2$sample!="MGH31",] #remove this tumor since it seemed full of errors
+ggplot(pd2,aes(x=lo,y=hi,colour=sample))+geom_point(size=2)+theme_bw()+xlim(0,.25)+ylim(.75,1)
+ggplot(pd2,aes(x=inflection,y=slope,colour=sample))+geom_point(size=2)+theme_bw()
+ggsave("results/plots/all_tumors/slope_inflect.png")
+ggplot(pd2,aes(x=det_rates,y=inflection,colour=sample))+geom_point(size=2)+theme_bw()+xlab("Cellular Detection Rate")+ylab("Inflection of Monotonic Smoother")
+ggsave("results/plots/all_tumors/inflect_detrate.png")
+ggplot(pd2,aes(x=det_rates,y=slope,colour=sample))+theme_bw()+geom_point(size=2)
+ggsave("results/plots/all_tumors/slope_detrate.pdf")
+```
+
+PCA/ Regression analysis to see which parameters best characterize the curves
+
+```{r}
+pd3<-pd2[,c("det_rates","inflection","slope","lo","hi")]
+pairs(pd3,pch=".")
+signif(cor(pd3),1)
+library(corrplot)
+corrplot.mixed(abs(cor(pd3)),upper="color",order="FPC") #lo and inflection are strongest predictors
+summary(lm(det_rates~inflection+slope+lo+hi,data=pd3))
+#all four parameters "statistically significant" but "lo" and "inflection" are strongest
+#determine effective dimensionality of parameters
+pca_res<-prcomp(pd3[,2:5],scale=TRUE)
+plot(pca_res) #shows there are about 3 major PCs out of 4 possible
+```
+
+
+# Distribution of Individual genes
+
+```{r}
+y<-m[!badgenes,cm$sampleType=="SC" & cm$instrument=="HISEQ"]
+hist(y[13,],breaks=40,main="",xlab="expression (counts)",probability=TRUE)
+
+library(tweedie)
+library(cplm)
+fit<-cpglm(y[13,]~1)
+curve(dtweedie(x,fit$p,exp(coef(fit)[1]),fit$phi),from=0,to=200,ylim=c(0,.0015))
+q<-rtweedie(10000,fit$p,exp(coef(fit)[1]),fit$phi)
+hist(q,breaks=40,main="",probability=TRUE)
+```

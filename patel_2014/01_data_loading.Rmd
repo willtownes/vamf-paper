@@ -1,0 +1,118 @@
+---
+title: "Patel Glioblastoma- Data Loading"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(modules)
+import_package("Matrix",attach=TRUE)
+import_package("ggplot2",attach=TRUE)
+biomart<-import_package("biomaRt")
+bcse<-import_package("SummarizedExperiment")
+plyr<-import_package("plyr")
+```
+
+The preprocessing is documented in the data package [patel2014gliohuman](https://github.com/willtownes/patel2014gliohuman)
+
+Load Count Data
+
+```{r}
+#devtools::install_github("willtownes/patel2014gliohuman")
+library(patel2014gliohuman)
+data(patel_counts) #creates summarizedExperiment object "patel_counts"
+```
+
+### Convert from ENSEMBL to HUGO gene IDs
+
+```{r}
+bm<-biomart$useMart(biomart="ENSEMBL_MART_ENSEMBL", dataset="hsapiens_gene_ensembl", host="jul2015.archive.ensembl.org")
+gmeta<-biomart$getBM(attributes=c("ensembl_gene_id","hgnc_symbol"),filters="ensembl_gene_id",values=rownames(patel_counts),mart=bm)
+gmeta<-gmeta[!duplicated(gmeta$ensembl_gene_id),]
+gmeta<-gmeta[gmeta$hgnc_symbol != "",] #remove pseudogenes
+#ensure same sort order between gmeta and patel
+patel<-patel_counts[gmeta$ensembl_gene_id,] 
+m<-bcse$assays(patel)$counts
+#find hugo IDs with multiple matching ensembl IDs
+dups<-plyr$ddply(gmeta,"hgnc_symbol",plyr$summarise,ndup=length(ensembl_gene_id))
+dups$is_dup<-dups$ndup>1
+gmeta<-plyr$join(gmeta,dups,by="hgnc_symbol")
+m1<-m[with(gmeta,ensembl_gene_id[!is_dup]),]
+rownames(m1)<-with(gmeta,hgnc_symbol[!is_dup])
+m2<-m[with(gmeta,ensembl_gene_id[is_dup]),]
+#combine ensembl gene counts that occurred for same HUGO gene
+m3<-lapply(1:ncol(m2),function(x){tapply(m2[,x],gmeta$hgnc_symbol[gmeta$is_dup],sum)})
+m3<-Matrix(do.call("cbind",m3))
+patel<-bcse$SummarizedExperiment(assays=list(counts=rbind(m1,m3)),  colData=bcse$colData(patel))
+save(patel,file="data/01_counts_genes.RData")
+```
+
+### Find Subset of Data
+We mostly care about the glioblastoma cells that were included in the analysis. Also, the authors excluded many samples due to quality control issues. Generate a filtered dataset based on these criteria.
+
+```{r}
+#load("data/01_counts_genes.RData")
+cm<-as.data.frame(bcse$colData(patel))
+table(cm$sampleType)
+keep<-with(cm,cellType=="Glioblastoma" & includeSample)
+with(cm[keep,],table(sampleType,tumorName))
+patel<-patel[,keep]
+save(patel,file="data/02_counts_genes_filtered.RData")
+```
+
+Find tumors with multiple plates for single cell
+
+```{r}
+cm<-as.data.frame(bcse$colData(patel))
+sc<-cm$sampleType=="SC"
+plyr$ddply(cm[sc,],"tumorName",plyr$summarise,nrun=length(unique(runID)))
+plyr$ddply(cm[sc,],"tumorName",plyr$summarise,ninst=length(unique(instrument)))
+#MGH26 is the only tumor with two instrument IDs
+cells<-sc & cm$tumorName=="MGH26"
+table(cm[cells,c("runID","instrument")])
+cells<-cells & cm$runID %in% c("556","704")
+head(cm[cells,])
+cnames<-cm[cells,"Run"]
+length(unique(cnames)) #118 cells
+#also include any bulk samples in this category
+blk<-with(cm,sampleType=="bulk" & tumorName=="MGH26")
+mgh26<-patel[,cells | blk]
+save(mgh26,file="data/MGH26/02_counts_genes_filtered.RData")
+```
+
+Summary: restrict analysis to Glioblastoma cells (not cell line) from tumor MGH26. Include only runID 556 (instrument GLPB22-B5C) and 704 (instrument HISEQ) since runID 825 was a singleton. Include only the cells used by the authors of the original paper.
+
+### Direct Download of Series Matrix
+
+Rather than processing reads, we can just use the expression matrix provided by the authors. However, they don't provide raw counts but rather an already normalized version of the data that doesn't preserve the "zeroes". However, it's still useful because they reduced to a subset of the genes. We can focus on those same genes to maintain comparability.
+```
+wget ftp://ftp.ncbi.nlm.nih.gov/geo/series/GSE57nnn/GSE57872/suppl/GSE57872%5FGBM%5Fdata%5Fmatrix.txt.gz -P data/original
+gunzip data/original/GSE57872_GBM*.txt.gz
+```
+
+```{r}
+m<-read.table("data/original/GSE57872_GBM_data_matrix.txt")
+genes<-rownames(m)
+genes<-genes[genes %in% rownames(patel)]
+dir.create("extdata")
+write.table(genes,"extdata/genes_patel_used.txt",row.names=FALSE,quot=FALSE,col.names=FALSE)
+```
+
+```{r}
+#this part not really used anymore but saving in case need to use Patel's normalized data later
+load("extdata/cmeta_MGH26_only.RData") #cmeta (column metadata)
+m0<-m
+#match column names to tumor names
+#focusing only on MGH26 here!
+#ids<-lapply(unique(cmeta$tumor),function(x){grep(x,colnames(m),fixed=TRUE)})
+#ids<-Reduce(union,ids)
+ids<-grep("MGH26",colnames(m),fixed=TRUE)
+ids<-colnames(m)[ids]
+#in the metadata, the two batches are "MGH26" and "MGH26-2"
+#in the series matrix column names, the batches are "MGH26" and "MGH264"
+#the last 3 elements of 'ids' are bulk samples, remove those
+ids<-ids[1:118]
+m<-m[,ids]
+colnames(m)<-gsub("MGH264_","MGH26-2_",ids,fixed=TRUE)
+m<-m[,cmeta$sampleName] #reorder columns to match metadata
+Y_obs<-m
+```

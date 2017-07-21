@@ -1,0 +1,309 @@
+---
+title: "Patel Glioblastoma- Dimension Reduction"
+author: "Will Townes"
+date: "5/20/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(modules) #devtools::install_github("klmr/modules")
+reshape2<-import_package("reshape2")
+bcse<-import_package("SummarizedExperiment")
+import_package("Matrix",attach=TRUE)
+import_package("ggplot2",attach=TRUE)
+existing<-import("../algs/existing") #pca, zifa, etc
+vamf<-import("../algs/vamf_stan") #our algorithm
+cls<-import("../util/classifiers") #used for LDA, QDA, visualizations
+fns<-import("../util/functions")
+plx2name<-function(plx){paste0("tSNE_plx_",plx)}
+```
+
+# MGH26 Only
+
+This is the only tumor spread across two batches so we use it to check for how each method does at removing the batch effect.
+
+## Loading Data
+
+First calculate size factors using scran
+
+```{r}
+#compute size factors with SCRAN (R 3.3+ only)
+#library(scran)
+load("data/MGH26/02_counts_genes_filtered.RData") #summarizedExperiment, includes a bulk sample!
+meta<-bcse$colData(mgh26)
+m<-as.matrix(bcse$assay(mgh26,"counts")[,meta$sampleType=="SC"])
+meta<-meta[meta$sampleType=="SC",]
+filter_genes<-function(m){m[rowSums(m>0)>3 & rowMeans(m)>0.2,]}
+m<-filter_genes(m)
+sizefactors <- scran::computeSumFactors(m)#,positive=TRUE)
+library_size <- colSums(m)
+plot(log(library_size),log(sizefactors)) #corr=.98
+hist(sizefactors,breaks=20)
+#write.table(sizefactors,file="data/MGH26/scran_sizefactors.txt",row.names=FALSE,col.names=FALSE)
+
+meta$instrument<-as.factor(meta$instrument)
+m<-Matrix(m)
+d<-list(counts=m)
+#raw counts needed for ZINB-WAVE
+Y_raw<-matrix(as.vector(d$counts,mode="integer"),nrow=nrow(d$counts))
+colnames(Y_raw)<-colnames(d$counts)
+rownames(Y_raw)<-rownames(d$counts)
+d$scran<-t(t(d$counts)/sizefactors)
+Y<-Matrix(d$scran)
+Y[Y<1]<-0 #detection threshold set higher than zero for "shot noise"
+meta$detection_rate<-Matrix::colMeans(Y>0)
+#meta$detection_rate<-meta$detection/nrow(d$counts)
+meta<-as.data.frame(meta)
+```
+
+SCRAN size factors are highly correlated with library size.
+
+## Visualization of Batch Effects
+
+Detection Rates by Batch
+
+```{r}
+ggplot(meta,aes(x=instrument,y=detection_rate))+geom_boxplot()+theme_bw()+ylab("detection rate")
+ggsave(file="results/plots/MGH26/detection_batch.pdf",height=6,width=8)
+```
+
+### Standard Dimension Reduction Methods
+
+```{r}
+img_save<-TRUE
+patel_plt<-function(factors,meta){
+  #x is data frame with factors, meta is data frame with batch info
+  #batch name is "instrument"
+  ggplot(cbind(meta,factors),aes(x=dim1,y=dim2,colour=instrument))+geom_point(size=3)+theme_bw()
+}
+plot_path<-file.path("./results/plots/MGH26/scran")
+ggs<-function(plt,w=6,h=4){if(img_save) ggsave(file=file.path(plot_path,plt),width=w,height=h)}
+```
+
+```{r}
+set.seed(101) #reproducible subsetting of dataset
+g2k<-sample.int(nrow(Y),2000)
+factors<-existing$pca(log2(1+Y[g2k,]))
+patel_plt(factors,meta)
+pd<-cbind(factors,det_rate=meta$detection_rate,instrument=meta$instrument)
+round(cor(pd[,-4]),2) #.72 correlation
+ggplot(pd,aes(x=det_rate,y=dim1,colour=instrument,shape=instrument))+geom_point(size=3)+theme_bw()+theme(legend.position="element_blank")+xlab("detection rate")+ylab("PC1")
+ggs("pc1_vs_detrate_g2k.pdf")
+
+write.table(pd,"../biostat_paper/data/patel/mgh26_pca_detrate_g2k.tsv",quot=FALSE,row.names=FALSE)
+```
+
+```{r}
+set.seed(101) #reproducible subsetting of dataset
+g2k<-sample.int(nrow(Y),2000)
+Y_obs<-Y[g2k,]
+dpath<-"data/MGH26/batch_separability"
+fns$sparse2disk(Y_obs,file.path(dpath,"2Kgenes.tsv"))
+Y_obs_l2<-log2(1+Y_obs)
+#fns$sparse2disk(Y_obs_l2,file.path(dpath,"2Kgenes_log.tsv"))
+
+### tSNE
+dat<-list()
+pplx<-20
+dat[[plx2name(pplx)]]<-factors<-existing$tsne(Y_obs_l2,2,perplexity=pplx)
+#fit<-cls$fit_classifier(factors,meta$instrument,"qda")
+#cls$plot_classifier(fit,factors,meta$instrument)
+patel_plt(factors,meta)+ggtitle(paste0("tSNE (perplexity ",pplx,")"))
+ggs("tsne_plx_hi.pdf")
+pplx<-5
+dat[[plx2name(pplx)]]<-factors<-existing$tsne(Y_obs_l2,2,perplexity=pplx)
+patel_plt(factors,meta)+ggtitle(paste0("tSNE (perplexity ",pplx,")"))
+ggs("tsne_plx_lo.pdf")
+
+### PCA
+factors<-existing$pca(Y_obs_l2,3)
+dat[["PCA"]]<-factors[,1:2]
+patel_plt(factors,meta)+ggtitle("Principal Components Analysis")
+ggs("pca12.pdf")
+ggplot(cbind(factors,meta),aes(x=dim2,y=dim3,color=instrument))+geom_point(size=3)+theme_bw()+ggtitle("Principal Components Analysis")
+ggs("pca23.pdf")
+
+### MDS
+dat[["MDS"]]<-existing$mds(Y_obs_l2,2,distance="manhattan")
+patel_plt(dat[["MDS"]],meta)+ggtitle("Manhattan Multidimensional Scaling")
+ggs("mds.pdf")
+```
+
+### ZINB-WAVE
+
+```{r}
+#library(zinbwave)
+#zinb-wave uses raw counts, no normalization
+system.time(zinb_res<-zinbwave::zinbFit(Y_raw[g2k,], K=2)) #100 seconds
+#Warning message:
+#In simpute.als(x, J, thresh, lambda, maxit, trace.it,  ... :
+#  Convergence not achieved by 100 iterations
+dat[["ZINB-WAVE"]]<-as.data.frame(zinb_res@W)
+colnames(dat[["ZINB-WAVE"]])<-paste0("dim",1:2)
+patel_plt(dat[["ZINB-WAVE"]],meta)+ggtitle("ZINB-WAVE")
+ggs("zinbwave.pdf")
+```
+
+### ZIFA
+
+```
+time python ../util/zifa_wrapper.py data/MGH26/batch_separability/2Kgenes.tsv
+```
+7.5min
+```{r}
+factors <- read.table(file.path(dpath,"2Kgenes_zifa.tsv"))
+colnames(factors)<-paste0("dim",1:2)
+dat[["ZIFA"]]<-factors
+patel_plt(factors,meta)+ggtitle("Zero Inflated Factor Analysis")
+ggs("zifa.pdf")
+```
+
+### fSCLVM
+
+```
+time python ../util/fsclvm_wrapper.py data/MGH26/batch_separability/2Kgenes.tsv --nHiddenSparse 2
+```
+16sec
+```{r}
+factors <- read.table(file.path(dpath,"2Kgenes_fsclvm.tsv"))
+colnames(factors)<-paste0("dim",1:2)
+dat[["fSCLVM"]]<-factors
+patel_plt(factors,meta)+ggtitle("f-SCLVM")
+ggs("fsclvm.pdf")
+```
+
+### Varying-Censoring Aware Matrix Factorization
+
+```{r}
+system.time(res<-vamf$vamf(Y_obs,2)) #289sec, about 5min
+#distribution of b1
+hist(res$b1,probability=TRUE,breaks=20,xlim=c(0,1.2))
+curve(dnorm(x,.75,.2),from=0,to=2,add=TRUE)
+curve(dnorm(x,.5,.1),from=0,to=2,add=TRUE,lty=2)
+
+dat[["VAMF"]]<-res$factors
+patel_plt(res$factors,meta)+ggtitle("Censored Matrix Factorization")
+ggs("vamf_mnar.pdf")
+```
+save b0, b1 scatter plot data for use in biostat paper
+```{r}
+vpd<-cbind(meta,b0=res$b0,b1=res$b1)
+ggplot(vpd,aes(x=b0,y=b1,colour=instrument,shape=instrument))+geom_point()+theme_classic()
+write.table(vpd,file="../biostat_paper/data/patel/mgh26_2Kgenes_vamf.tsv",row.names=FALSE)
+```
+
+### Comparing all methods
+
+```{r}
+pd<-do.call("rbind",lapply(names(dat),function(x){cbind(method=x,batch=meta$instrument,dat[[x]])}))
+write.table(pd,file=file.path(dpath,"2Kgenes_all_methods.tsv"),row.names=FALSE)
+#pd<-read.table(file.path(dpath,"2Kgenes_all_methods.tsv"),header=TRUE)
+#pd$method<-factor(pd$method,levels=c("tSNE_plx_20","tSNE_plx_5","PCA","MDS","ZIFA","VAMF","fSCLVM","ZINB-WAVE"))
+ggplot(subset(pd,!(method %in% c("MDS","ZINB-WAVE","fSCLVM"))), aes(x=dim1,y=dim2,colour=batch,shape=batch)) + geom_point() + facet_wrap(~method,scales="free",nrow=3)+theme_bw()+theme(legend.position="bottom")
+ggs("all_methods.pdf",w=8,h=10.5)
+#ggplot(pd,aes(x=dim1,y=dim2,colour=batch,shape=batch)) + geom_point() + facet_wrap(~method,scales="free",nrow=3)+theme_bw()+theme(legend.position="bottom")
+```
+
+save intermediate data for biostats paper
+
+```{r}
+write.table(pd,file="../biostat_paper/data/patel/mgh26_2Kgenes_all_methods.tsv",row.names=FALSE)
+```
+
+### Quantifying Separability over multiple random gene subsets
+
+write replicate subsets to disk
+
+```{r}
+set.seed(101) #replicable subsetting of dataset
+gsets<-replicate(100,sample.int(nrow(Y),2000),simplify=FALSE)
+Ysubsets<-lapply(gsets,function(x){Y[x,]})
+Ysubsets_raw<-lapply(gsets,function(x){Y_raw[x,]})
+
+fpath<-file.path("data/MGH26/batch_separability/subsets_scran")
+dir.create(fpath)
+invisible(mapply(function(y,f){fns$sparse2disk(y,file.path(fpath,paste0(f,".tsv")))}, Ysubsets, 1:100))
+fpath<-file.path("data/MGH26/batch_separability/subsets_raw")
+dir.create(fpath)
+for(i in 1:100){
+  write.table(Ysubsets_raw[[i]],file.path(fpath,paste0(i,".txt")),quot=FALSE)
+}
+```
+
+analyze replicates using VAMF script
+
+```
+seq 1 100 | parallel Rscript ../algs/vamf_script.R -p 1 -d 10 -i data/MGH26/batch_separability/subsets_scran/{}.tsv -o data/MGH26/batch_separability/vamf_out/{}.tsv
+```
+
+analyze replicates using ZIFA.
+```
+seq 1 100 | parallel python ../util/zifa_wrapper.py data/MGH26/batch_separability/subsets_scran/{}.tsv -o data/MGH26/batch_separability/zifa_out/{}.tsv
+```
+
+analyze replicates using ZINB-WAVE.
+```
+seq 1 100 | parallel Rscript ../algs/zinbwave_script.R -i data/MGH26/batch_separability/subsets_raw/{}.txt -o data/MGH26/batch_separability/zinbwave_out/{}.tsv
+```
+
+analyze replicates using fSCLVM.
+```
+seq 1 100 | parallel python ../util/fsclvm_wrapper.py data/MGH26/batch_separability/subsets_scran/{}.tsv -o data/MGH26/batch_separability/fsclvm_out/{}.tsv --nHiddenSparse 2
+```
+
+```{r}
+nsim<-100
+dat<-list()
+for(plx in c(20,5)){
+  dat[[plx2name(plx)]]<-lapply(Ysubsets,existing$tsne,perplexity=plx)
+}
+dat[["PCA"]]<-lapply(Ysubsets,existing$pca)
+dat[["MDS"]]<-lapply(Ysubsets,existing$mds,distance="manhattan")
+#read in ZIFA and VAMF results
+fpath<-file.path("data/MGH26/batch_separability")
+tmp_fn<-function(x,folder=c("vamf_out","zifa_out","zinbwave_out","fsclvm_out")){
+  folder<-match.arg(folder)
+  d<-file.path(fpath,folder,paste0(x,".tsv"))
+  if(folder %in% c("zifa_out","fsclvm_out")){ #no column headers
+    res<-read.table(d)
+    colnames(res)<-paste0("dim",1:ncol(res))
+    return(res)
+  } else { #VAMF and ZINB-WAVE have column headers
+    return(read.table(d,header=TRUE))
+  }
+}
+dat[["ZIFA"]]<-lapply(seq_len(nsim),tmp_fn,folder="zifa_out")
+dat_vamf<-lapply(seq_len(nsim),tmp_fn,folder="vamf_out")
+dat[["VAMF"]]<-lapply(dat_vamf,function(x){x[,1:2]}) #restrict to top two dimension for comparability
+dat[["ZINB-WAVE"]]<-lapply(seq_len(nsim),tmp_fn,folder="zinbwave_out")
+dat[["fSCLVM"]]<-lapply(seq_len(nsim),tmp_fn,folder="fsclvm_out")
+res<-expand.grid(method=names(dat),classifier=c("LDA","QDA"))
+cls_err<-matrix(NA,nrow=nrow(res),ncol=nsim)
+cls_funcs<-list(LDA=cls$lda_wrap,QDA=cls$qda_wrap)
+for(i in 1:nrow(res)){
+  cfn<-cls_funcs[[res[i,"classifier"]]]
+  d<-as.character(res[i,"method"])
+  cls_err[i,]<-vapply(dat[[d]],cfn,FUN.VALUE=1.0,labels=meta$instrument)
+}
+res<-cbind(res,cls_err)
+res<-reshape2$melt(res,c("method","classifier"),variable.name="sim",value.name="cls_err")
+res$Batch_Separability<-1-res$cls_err
+#cache data for changing plots later if needed
+write.table(res,file="results/plots/MGH26/scran/separability_plot_data.tsv",row.names=FALSE,quote=FALSE)
+
+#save for biostat paper
+write.table(res,file="../biostat_paper/data/patel/mgh26_batch_separability.tsv",row.names=FALSE,quote=FALSE)
+```
+
+```{r}
+#res<-read.table("results/plots/MGH26/scran/separability_plot_data.tsv",header=TRUE)
+res$method<-reorder(res$method,res$Batch_Separability,function(x){-median(x)})
+
+plt1_methods<-c("VAMF","tSNE_plx_5","tSNE_plx_20","PCA","ZIFA")
+ggplot(res[res$method %in% plt1_methods,], aes(x=method,y=Batch_Separability,fill=classifier))+geom_boxplot()+theme_classic()+coord_flip()+theme(legend.position="top")+ylab("batch separability")
+ggsave("results/plots/MGH26/scran/separability_boxplot.pdf",width=8,height=6)
+
+plt2_methods<-c("VAMF","fSCLVM","ZINB-WAVE")
+ggplot(res[res$method %in% plt2_methods,], aes(x=method,y=Batch_Separability,fill=classifier))+geom_boxplot()+theme_classic()+coord_flip()+theme(legend.position="top")+ylab("batch separability")
+ggsave("results/plots/MGH26/scran/separability_boxplot2.pdf",width=8,height=6)
+```
