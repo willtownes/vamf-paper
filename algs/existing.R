@@ -87,6 +87,18 @@ simlr<-function(Y,nclust,L=2,...){
   factors
 }
 
+cidr<-function(Y,L=2){
+  sData <- cidr::scDataConstructor(Y)
+  sData <- cidr::determineDropoutCandidates(sData)
+  sData <- cidr::wThreshold(sData)
+  sData <- cidr::scDissim(sData)
+  sData <- cidr::scPCA(sData)
+  sData <- cidr::nPC(sData)
+  factors<-as.data.frame(sData@PC[,1:L])
+  colnames(factors)<-c("dim1","dim2")
+  factors
+}
+
 ppca<-function(Y,L=2,...){
   stop("implementation not yet finished")
   pcaMethods::pp(Y,L,...)

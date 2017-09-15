@@ -90,6 +90,7 @@ round(cor(pd[,-4]),2) #.72 correlation
 ggplot(pd,aes(x=det_rate,y=dim1,colour=instrument,shape=instrument))+geom_point(size=3)+theme_bw()+theme(legend.position="element_blank")+xlab("detection rate")+ylab("PC1")
 ggs("pc1_vs_detrate_g2k.pdf")
 
+dir.create("../biostat_paper/data/patel",recursive=TRUE)
 write.table(pd,"../biostat_paper/data/patel/mgh26_pca_detrate_g2k.tsv",quot=FALSE,row.names=FALSE)
 ```
 
@@ -98,6 +99,7 @@ set.seed(101) #reproducible subsetting of dataset
 g2k<-sample.int(nrow(Y),2000)
 Y_obs<-Y[g2k,]
 dpath<-"data/MGH26/batch_separability"
+dir.create(dpath)
 fns$sparse2disk(Y_obs,file.path(dpath,"2Kgenes.tsv"))
 Y_obs_l2<-log2(1+Y_obs)
 #fns$sparse2disk(Y_obs_l2,file.path(dpath,"2Kgenes_log.tsv"))
@@ -127,6 +129,16 @@ ggs("pca23.pdf")
 dat[["MDS"]]<-existing$mds(Y_obs_l2,2,distance="manhattan")
 patel_plt(dat[["MDS"]],meta)+ggtitle("Manhattan Multidimensional Scaling")
 ggs("mds.pdf")
+```
+
+### CIDR
+
+```{r}
+factors<-existing$cidr(Y_raw[g2k,],2)
+patel_plt(factors,meta)
+pd<-cbind(factors,det_rate=meta$detection_rate,instrument=meta$instrument)
+round(cor(pd[,-4]),2) #.42 correlation
+ggplot(pd,aes(x=det_rate,y=dim1,colour=instrument,shape=instrument))+geom_point(size=3)+theme_bw()+theme(legend.position="element_blank")+xlab("detection rate")+ylab("CIDR1")
 ```
 
 ### ZINB-WAVE
@@ -221,7 +233,7 @@ Ysubsets<-lapply(gsets,function(x){Y[x,]})
 Ysubsets_raw<-lapply(gsets,function(x){Y_raw[x,]})
 
 fpath<-file.path("data/MGH26/batch_separability/subsets_scran")
-dir.create(fpath)
+dir.create(fpath,recursive=TRUE)
 invisible(mapply(function(y,f){fns$sparse2disk(y,file.path(fpath,paste0(f,".tsv")))}, Ysubsets, 1:100))
 fpath<-file.path("data/MGH26/batch_separability/subsets_raw")
 dir.create(fpath)
@@ -259,6 +271,7 @@ for(plx in c(20,5)){
 }
 dat[["PCA"]]<-lapply(Ysubsets,existing$pca)
 dat[["MDS"]]<-lapply(Ysubsets,existing$mds,distance="manhattan")
+dat[["CIDR"]]<-lapply(Ysubsets_raw,existing$cidr)
 #read in ZIFA and VAMF results
 fpath<-file.path("data/MGH26/batch_separability")
 tmp_fn<-function(x,folder=c("vamf_out","zifa_out","zinbwave_out","fsclvm_out")){
@@ -300,6 +313,7 @@ write.table(res,file="../biostat_paper/data/patel/mgh26_batch_separability.tsv",
 res$method<-reorder(res$method,res$Batch_Separability,function(x){-median(x)})
 
 plt1_methods<-c("VAMF","tSNE_plx_5","tSNE_plx_20","PCA","ZIFA")
+#plt1_methods<-c("CIDR","tSNE_plx_5","tSNE_plx_20","PCA")
 ggplot(res[res$method %in% plt1_methods,], aes(x=method,y=Batch_Separability,fill=classifier))+geom_boxplot()+theme_classic()+coord_flip()+theme(legend.position="top")+ylab("batch separability")
 ggsave("results/plots/MGH26/scran/separability_boxplot.pdf",width=8,height=6)
 
