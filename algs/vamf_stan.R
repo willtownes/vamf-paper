@@ -9,7 +9,9 @@ parallel<-import_package("parallel")
 library(rstan)
 rstan_options(auto_write=TRUE)
 
-STMOD<-stan_model("../algs/vamf.stan")
+stmod_names<-c("vamf","vamf_simple")
+STMODS<-lapply(stmod_names,function(x){stan_model(paste0("../algs/",x,".stan"))})
+names(STMODS)<-stmod_names
 
 rm_zero_rowcol<-function(Y){
   #remove all rows and columns containing all zeros
@@ -82,14 +84,15 @@ vb_wrap<-function(svmult,stmod,ss,resnames,output_samples){
   mget(c("stan_vb_fit","logtxt"))
 }
 
-vamf_stan<-function(ss, svmult=rep.int(1.0,4), output_samples=100){
+vamf_stan<-function(ss, stmod, svmult=rep.int(1.0,4), output_samples=100){
   # ss is a list of data and hyperparameters
   # length of svmult determines number of parallel restarts to run
   # svmult values are multiplier for estimate of sigma_v hyperparameter. Large value= less shrinkage
   # output_samples controls how many samples from variational distr are used to compute approximate posterior mean.
-  resnames<-c("U","w","sy","y0","V","sv","b0","b1")
+  resnames<-c("U","w","sy","y0","V","sv")
+  if(stmod=="vamf") resnames<-c(resnames,"b0","b1")
   #variational bayes
-  res<-parallel$mclapply(svmult,vb_wrap,STMOD,ss,resnames,output_samples)
+  res<-parallel$mclapply(svmult,vb_wrap,STMODS[[stmod]],ss,resnames,output_samples)
   #get rid of model runs that resulted in errors
   return(Filter(function(x){class(x)!="try-error"},res))
 }
@@ -148,11 +151,12 @@ ortho_extract<-function(stfit,ss){
   ortho_vamf(extract_factors(stfit$stan_vb_fit,ss))
 }
 
-vamf<-function(Y, L, nrestarts=4, log2trans=TRUE, pseudocount=0.0, output_samples=100, save_restarts=FALSE,svmult=1){
+vamf<-function(Y, L, stmod=c("vamf","vamf_simple"), nrestarts=4, log2trans=TRUE, pseudocount=0.0, output_samples=100, save_restarts=FALSE,svmult=1){
   #convenience wrapper for running instances of selection factorization
+  stmod=match.arg(stmod)
   ss<-init_ss(Y,L,log2trans=log2trans,pseudocount=pseudocount)
   svmult_vals<-rep_len(svmult,nrestarts)
-  stan_fits<-vamf_stan(ss, svmult_vals, output_samples=output_samples)
+  stan_fits<-vamf_stan(ss, stmod, svmult_vals, output_samples=output_samples)
   elbos<-vapply(stan_fits, function(x){extract_elbo(x$logtxt)}, 1.0)
   if(save_restarts){
     factor_list<-lapply(stan_fits, ortho_extract, ss)

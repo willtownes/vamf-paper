@@ -1,10 +1,12 @@
 # Functions for running existing methods such as tSNE, PCA, ZIFA, etc on censored data
 library(modules)
-irlba<-import_package("irlba")
-MASS<-import_package("MASS")
+#irlba<-import_package("irlba")
+#MASS<-import_package("MASS")
 import_package("Matrix",attach=TRUE)
-tsne_pack<-import_package("tsne")
-Rtsne<-import_package("Rtsne")
+#tsne_pack<-import_package("tsne")
+#Rtsne<-import_package("Rtsne")
+#simlr_pack<-import_package("SIMLR")
+bioc_pcaMethods<-import_package("pcaMethods")
 
 rm_zero_rowcol<-function(Y){
   #remove all rows and columns containing all zeros
@@ -26,9 +28,9 @@ pca_irlba<-function(Y,L=2,center=TRUE,scale=TRUE){
   #Y<-as.matrix(Y)
   Y<-rm_zero_rowcol(Y)
   #if(scale) Y<-t(scale(t(Y)))
-  #svd1<-irlba$irlba(Y,L)
+  #svd1<-irlba::irlba(Y,L)
   #factors<-t(svd1$d * t(svd1$v)) #using recycling
-  factors<-irlba$prcomp_irlba(t(Y),n=L,center=center,scale=scale)
+  factors<-irlba::prcomp_irlba(t(Y),n=L,center=center,scale=scale)
   #colnames(factors)<-paste0("pca_irlba",1:L)
   colnames(factors)<-paste0("dim",1:L)
   as.data.frame(factors$x)
@@ -56,7 +58,7 @@ mds<-function(Y,L=2,metric=TRUE,distance="euclidean",scale=TRUE){
   if(metric){
     fit<-cmdscale(d,k=L)
   } else {
-    fit<-MASS$isoMDS(d,k=L)$points
+    fit<-MASS::isoMDS(d,k=L)$points
   }
   colnames(fit)<-paste0("dim",1:L)
   as.data.frame(fit)
@@ -69,10 +71,23 @@ tsne<-function(Y,L=2,center=TRUE,scale=TRUE,method="Rtsne",...){
   }
   Yt<-as.matrix(Yt)
   if(method=="Rtsne"){
-    fit<-Rtsne$Rtsne(Yt,dims=L,...)$Y
+    fit<-Rtsne::Rtsne(Yt,dims=L,...)$Y
   } else if(method=="tsne"){
-    fit<-tsne_pack$tsne(Yt,k=L,...)
+    fit<-tsne::tsne(Yt,k=L,...)
   }
   colnames(fit)<-paste0("dim",1:L)
   as.data.frame(fit)
+}
+
+simlr<-function(Y,nclust,L=2,...){
+  res<-SIMLR::SIMLR(Y,nclust,no.dim=L,...)
+  #the clustering results are in res$y
+  factors<-res$ydata
+  colnames(factors)<-paste0("dim",1:L)
+  factors
+}
+
+ppca<-function(Y,L=2,...){
+  stop("implementation not yet finished")
+  pcaMethods::pp(Y,L,...)
 }

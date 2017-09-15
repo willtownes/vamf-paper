@@ -64,6 +64,21 @@ write.table(Matrix$summary(Y_obs),file="plot_data/noise_only.tsv",row.names=FALS
 #stopifnot(max(abs(Y_obs2-Y_obs))<1e-5) #check for errors
 ```
 
+### CIDR
+
+```{r}
+sData <- cidr::scDataConstructor(2^as.matrix(Y_obs)-1)
+#sData <- cidr::scDataConstructor(as.matrix(Y_obs))
+sData <- cidr::determineDropoutCandidates(sData)
+sData <- cidr::wThreshold(sData)
+sData <- cidr::scDissim(sData)
+sData <- cidr::scPCA(sData)
+sData <- cidr::nPC(sData)
+factors<-as.data.frame(sData@PC[,c(1,2)])
+colnames(factors)<-c("dim1","dim2")
+plt_noise(factors,batch)
+```
+
 ### Standard Dimension Reduction Methods
 
 ```{r}
@@ -135,7 +150,8 @@ This is our algorithm.
 
 ```{r}
 #Y_obs<-do.call(Matrix$sparseMatrix,read.table("plot_data/noise_only.tsv",header=TRUE))
-system.time(res<-vamf$vamf(Y_obs,10,log2trans=FALSE)) #126 s
+system.time(res<-vamf$vamf(Y_obs,10,stmod="vamf_simple", log2trans=FALSE)) 
+#126s for full model, 90s for model with fixed dropout pars
 #batch<-rep(c("high detection","low detection"),each=80)
 plt_noise(res$factors,batch)
 barplot(existing$colNorms(res$factors)) #dimension learning?
@@ -225,7 +241,8 @@ This is our new algorithm VAMF. We also compare the effect of svmult tuning para
 
 ```{r}
 #Y_obs<-do.call(Matrix$sparseMatrix,read.table("plot_data/latent_clusters.tsv",header=TRUE))
-system.time(res<-vamf$vamf(Y_obs,10,log2trans=FALSE)) #256 sec
+system.time(res<-vamf$vamf(Y_obs,10,"vamf_simple",log2trans=FALSE)) 
+#256 sec for full model, 163 for simple model
 
 plt_clst(res$factors[,1:2],ref)
 barplot(existing$colNorms(res$factors))
@@ -275,6 +292,39 @@ plt_clst(factors,ref)+ggtitle("f-SCLVM")
 ggs("fsclvm.pdf")
 ```
 fSCLVM does a good job removing the detection rate bias by absorbing it into dense factors, but can be too aggressive at pruning away dimensions.
+
+### SIMLR
+
+```{r}
+system.time(res<-SIMLR::SIMLR(as.matrix(Y_obs),4,2))
+factors<-res$ydata
+colnames(factors)<-c("dim1","dim2")
+plt_clst(factors,ref)
+```
+
+### PPCA
+
+```{r}
+system.time(res<-pcaMethods::pca(t(as.matrix(Y_obs)),"ppca",2))
+factors<-res@scores
+colnames(factors)<-c("dim1","dim2")
+plt_clst(factors,ref)
+```
+
+### CIDR
+
+```{r}
+#sData <- cidr::scDataConstructor(2^as.matrix(Y_obs)-1)
+sData <- cidr::scDataConstructor(as.matrix(Y_obs))
+sData <- cidr::determineDropoutCandidates(sData)
+sData <- cidr::wThreshold(sData)
+sData <- cidr::scDissim(sData)
+sData <- cidr::scPCA(sData)
+sData <- cidr::nPC(sData)
+factors<-sData@PC[,c(1,2)]
+colnames(factors)<-c("dim1","dim2")
+plt_clst(factors,ref)
+```
 
 ### Comparison of Methods
 
