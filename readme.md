@@ -1,5 +1,5 @@
 # Varying-Censoring Aware Matrix Factorization (VAMF)
-VAMF is a probabilistic dimension reduction method for single cell RNA-Seq datasets. For details see the biorxiv preprint.
+VAMF is a probabilistic dimension reduction method for single cell RNA-Seq datasets. For details see the [biorxiv preprint](http://www.biorxiv.org/content/early/2017/07/21/166736). VAMF is also implemented as an [R package](https://github.com/willtownes/vamf).
 
 ## Repository Contents
 
