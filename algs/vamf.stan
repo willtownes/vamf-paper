@@ -12,8 +12,8 @@ data {
   //mnar part
   int<lower=0,upper=1> Z[N,G]; //indicator of observed data, transpose from Y indices
   vector<lower=0,upper=1>[N] Q; //detection rates
-  real b1_mn; #.5 is reasonable
-  real<lower=0> b1_sd; #.1 is reasonable
+  real b1_mn; //.5 is reasonable
+  real<lower=0> b1_sd; //.1 is reasonable
 }
 transformed data {
   row_vector[N] b0_mn;
@@ -26,8 +26,8 @@ parameters {
   vector[G] w_raw;
   real<lower=0> sy;
   vector<lower=0>[L] sv;
-  row_vector[N] b0_raw; #missingness intercept
-  row_vector[N] b1_raw; #missingness slope
+  row_vector[N] b0_raw; //missingness intercept
+  row_vector[N] b1_raw; //missingness slope
 }
 transformed parameters {
   real y0;
@@ -35,7 +35,7 @@ transformed parameters {
   matrix[G,L] V;
   row_vector[N] b0;
   row_vector[N] b1;
-  y0 = 5*y0_raw + ymn; #super flat prior for intercept term
+  y0 = 5*y0_raw + ymn; //super flat prior for intercept term
   w = sw*w_raw;
   V = diag_post_multiply(V_raw,sv);
   b0 = b0_mn+b0_raw;
@@ -49,7 +49,7 @@ model {
   y0_raw ~ cauchy(0,1);
   b0_raw ~ cauchy(0,1);
   b1_raw ~ normal(0,1);
-  sy ~ cauchy(0,1); #half cauchy
+  sy ~ cauchy(0,1); //half cauchy
   sv ~ gamma(2,sv_rate);
   for(l in 1:L){
     V_raw[:,l] ~ normal(0,1);
