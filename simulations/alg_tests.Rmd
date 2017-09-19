@@ -15,7 +15,7 @@ Matrix<-import_package("Matrix")
 sims<-import("../simulations/sims") #simulate missing data mechanisms
 existing<-import("../algs/existing") #pca, zifa, etc
 vamf<-import("../algs/vamf_stan") #our algorithm
-img_save<-TRUE
+img_save<-FALSE
 ```
 
 Misc. functions used elsewhere
@@ -68,7 +68,7 @@ write.table(Matrix$summary(Y_obs),file="plot_data/noise_only.tsv",row.names=FALS
 
 ```{r}
 sData <- cidr::scDataConstructor(2^as.matrix(Y_obs)-1)
-#sData <- cidr::scDataConstructor(as.matrix(Y_obs))
+sData <- cidr::scDataConstructor(as.matrix(Y_obs))
 sData <- cidr::determineDropoutCandidates(sData)
 sData <- cidr::wThreshold(sData)
 sData <- cidr::scDissim(sData)

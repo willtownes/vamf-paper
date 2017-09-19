@@ -38,7 +38,7 @@ wthresh<-function(object,cutoff=.5){
 
 Y<-2^as.matrix(Y_obs)-1
 sData <- cidr::scDataConstructor(Y)
-sData <- cidr::determineDropoutCandidates(sData)
+sData <- cidr::determineDropoutCandidates(sData,zerosOnly=TRUE)
 hist(sData@dThreshold) #these are the lower bounds
 res<-wthresh(sData)
 sData<-res$cidr_object
@@ -49,8 +49,6 @@ plot(threshc,sData@dThreshold)
 
 #sData <- cidr::wThreshold(sData) #replace with custom function
 sData <- cidr::scDissim(sData) #replace with custom function
-
-
 
 sData <- cidr::scPCA(sData)
 sData <- cidr::nPC(sData)
