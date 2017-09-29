@@ -64,21 +64,6 @@ write.table(Matrix$summary(Y_obs),file="plot_data/noise_only.tsv",row.names=FALS
 #stopifnot(max(abs(Y_obs2-Y_obs))<1e-5) #check for errors
 ```
 
-### CIDR
-
-```{r}
-sData <- cidr::scDataConstructor(2^as.matrix(Y_obs)-1)
-sData <- cidr::scDataConstructor(as.matrix(Y_obs))
-sData <- cidr::determineDropoutCandidates(sData)
-sData <- cidr::wThreshold(sData)
-sData <- cidr::scDissim(sData)
-sData <- cidr::scPCA(sData)
-sData <- cidr::nPC(sData)
-factors<-as.data.frame(sData@PC[,c(1,2)])
-colnames(factors)<-c("dim1","dim2")
-plt_noise(factors,batch)
-```
-
 ### Standard Dimension Reduction Methods
 
 ```{r}
@@ -109,6 +94,29 @@ ggs("pca23.pdf")
 dat[["MDS"]]<-existing$mds(Y_obs,2,distance="manhattan")
 plt_noise(dat[["MDS"]],batch)+ggtitle("Manhattan Multidimensional Scaling")
 ggs("mds.pdf")
+```
+
+### Regression against Detection Rates followed by PCA on Residuals
+
+```{r}
+dat[["regpca"]]<-factors<-existing$regpca(Y_obs,2)
+plt_noise(factors,batch)
+ggs("regpca.pdf")
+```
+
+### CIDR
+
+```{r}
+sData <- cidr::scDataConstructor(2^as.matrix(Y_obs)-1)
+sData <- cidr::scDataConstructor(as.matrix(Y_obs))
+sData <- cidr::determineDropoutCandidates(sData)
+sData <- cidr::wThreshold(sData)
+sData <- cidr::scDissim(sData)
+sData <- cidr::scPCA(sData)
+sData <- cidr::nPC(sData)
+dat[["CIDR"]]<-factors<-as.data.frame(sData@PC[,c(1,2)])
+colnames(factors)<-c("dim1","dim2")
+plt_noise(factors,batch)
 ```
 
 ### ZIFA
@@ -233,6 +241,14 @@ ggs("pca23.pdf")
 dat[["MDS"]]<-existing$mds(Y_obs,2,distance="manhattan")
 plt_clst(dat[["MDS"]],ref)+ggtitle("Manhattan Multidimensional Scaling")
 ggs("mds.pdf")
+```
+
+### Regression-PCA
+
+```{r}
+dat[["regpca"]]<-factors<-existing$regpca(Y_obs,2)
+plt_clst(factors,ref)+ggtitle("Regression-PCA")
+ggs("regpca.pdf")
 ```
 
 ### Variable-censoring Aware Matrix Factorization

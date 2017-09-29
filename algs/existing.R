@@ -103,3 +103,16 @@ ppca<-function(Y,L=2,...){
   stop("implementation not yet finished")
   pcaMethods::pp(Y,L,...)
 }
+
+regpca<-function(Y,L=2,...){
+  #regress against detection rate as a covariate then do PCA on residuals
+  Y<-as.matrix(Y)
+  pdet<-colMeans(Y>0) #detection rates for each cell
+  detlm<-lm(t(Y)~pdet) #multivariate linear regression
+  Yrs<-t(resid(detlm))
+  Ysvd<-svd(Yrs)
+  #V<-t(Ysvd$u)[1:L,]
+  factors<-as.data.frame(t(Ysvd$d[1:L]*t(Ysvd$v)[1:L,]))
+  colnames(factors)<-paste0("dim",1:L)
+  factors
+}
